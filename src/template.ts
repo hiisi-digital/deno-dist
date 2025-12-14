@@ -46,6 +46,9 @@ export interface ParsedVariable {
 /** Pattern for template variables: @{...} */
 const VARIABLE_PATTERN = /@\{([^}]+)\}/g;
 
+/** Quick check pattern for variable presence (non-capturing, faster) */
+const HAS_VARIABLE_PATTERN = /@\{/;
+
 /** Pattern for single insertion markers: <!-- --dist-template: name --> */
 const SINGLE_MARKER_PATTERN = /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s*-->/g;
 
@@ -60,6 +63,16 @@ const CAPTURE_PATTERN = /@\{=([^}]+)\}/g;
 
 /** Characters that need escaping in regex */
 const REGEX_ESCAPE_PATTERN = /[.*+?^${}()|[\]\\]/g;
+
+// =============================================================================
+// Memoization Cache
+// =============================================================================
+
+/** Cache for parsed variables to avoid repeated parsing */
+const parseVariableCache = new Map<string, ParsedVariable>();
+
+/** Maximum cache size to prevent unbounded memory growth */
+const MAX_CACHE_SIZE = 1000;
 
 // =============================================================================
 // Variable Creation
@@ -121,30 +134,53 @@ const PREFIX_CONFIG = "config.";
 
 /**
  * Parse a template variable string into its components.
+ * Results are memoized for performance.
  *
  * @param variableText The variable text (e.g., "=name", "env.HOME", "config.version")
  * @returns Parsed variable information
  */
 export function parseVariable(variableText: string): ParsedVariable {
+  // Check cache first
+  const cached = parseVariableCache.get(variableText);
+  if (cached) {
+    return cached;
+  }
+
   const raw = `@{${variableText}}`;
+  let result: ParsedVariable;
 
   // Capture variable: =varName
   if (variableText.startsWith("=")) {
-    return { raw, type: "capture", key: variableText.slice(1), isCapture: true };
+    result = { raw, type: "capture", key: variableText.slice(1), isCapture: true };
+  } // Environment variable: env.VAR_NAME
+  else if (variableText.startsWith(PREFIX_ENV)) {
+    result = { raw, type: "env", key: variableText.slice(PREFIX_ENV.length), isCapture: false };
+  } // Config namespace: config.field
+  else if (variableText.startsWith(PREFIX_CONFIG)) {
+    result = {
+      raw,
+      type: "config",
+      key: variableText.slice(PREFIX_CONFIG.length),
+      isCapture: false,
+    };
+  } // Custom variable (no prefix)
+  else {
+    result = { raw, type: "custom", key: variableText, isCapture: false };
   }
 
-  // Environment variable: env.VAR_NAME
-  if (variableText.startsWith(PREFIX_ENV)) {
-    return { raw, type: "env", key: variableText.slice(PREFIX_ENV.length), isCapture: false };
+  // Cache the result (with size limit)
+  if (parseVariableCache.size < MAX_CACHE_SIZE) {
+    parseVariableCache.set(variableText, result);
   }
 
-  // Config namespace: config.field
-  if (variableText.startsWith(PREFIX_CONFIG)) {
-    return { raw, type: "config", key: variableText.slice(PREFIX_CONFIG.length), isCapture: false };
-  }
+  return result;
+}
 
-  // Custom variable (no prefix)
-  return { raw, type: "custom", key: variableText, isCapture: false };
+/**
+ * Clear the parse variable cache. Useful for testing.
+ */
+export function clearParseVariableCache(): void {
+  parseVariableCache.clear();
 }
 
 /**
@@ -232,6 +268,14 @@ export function resolveVariables(
   variables: TemplateVariables,
   strict = false,
 ): string {
+  // Fast path: if no variables present, return as-is
+  if (!HAS_VARIABLE_PATTERN.test(text)) {
+    return text;
+  }
+
+  // Reset lastIndex for global regex
+  VARIABLE_PATTERN.lastIndex = 0;
+
   return text.replace(VARIABLE_PATTERN, (match, variableText: string) => {
     const parsed = parseVariable(variableText);
     const value = resolveVariable(parsed, variables);

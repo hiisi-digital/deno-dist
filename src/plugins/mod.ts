@@ -87,6 +87,7 @@ export function listPlugins(): readonly string[] {
 export function clearPluginCache(): void {
   registry.plugins.clear();
   loadPromises.clear();
+  // Note: builtinPluginCache is intentionally not cleared as built-in plugins are immutable
 }
 
 // =============================================================================
@@ -137,30 +138,50 @@ function isValidPlugin(obj: unknown): obj is Plugin {
 // Built-in Plugin Loading
 // =============================================================================
 
-/** Built-in plugin IDs */
-const BUILTIN_PLUGINS = new Set(["deno-to-node", "deno-to-bun", "deno-passthrough"]);
+/** Built-in plugin IDs for fast lookup */
+const BUILTIN_PLUGIN_IDS = new Set(["deno-to-node", "deno-to-bun", "deno-passthrough"]);
+
+/** Cached built-in plugin imports - lazy loaded */
+const builtinPluginCache = new Map<string, Plugin>();
 
 /**
  * Check if a plugin ID is a built-in plugin.
  */
 function isBuiltinPlugin(id: string): boolean {
-  return BUILTIN_PLUGINS.has(id);
+  return BUILTIN_PLUGIN_IDS.has(id);
 }
 
 /**
  * Load a built-in plugin by ID.
+ * Uses lazy loading with caching to avoid re-importing.
  */
 async function loadBuiltinPlugin(id: string): Promise<Plugin | undefined> {
+  // Check cache first
+  const cached = builtinPluginCache.get(id);
+  if (cached) {
+    return cached;
+  }
+
+  let plugin: Plugin | undefined;
+
   switch (id) {
     case "deno-to-node":
-      return (await import("./deno_to_node.ts")).default;
+      plugin = (await import("./deno_to_node.ts")).default;
+      break;
     case "deno-to-bun":
-      return (await import("./deno_to_bun.ts")).default;
+      plugin = (await import("./deno_to_bun.ts")).default;
+      break;
     case "deno-passthrough":
-      return (await import("./deno_passthrough.ts")).default;
-    default:
-      return undefined;
+      plugin = (await import("./deno_passthrough.ts")).default;
+      break;
   }
+
+  // Cache the loaded plugin
+  if (plugin) {
+    builtinPluginCache.set(id, plugin);
+  }
+
+  return plugin;
 }
 
 // =============================================================================
