@@ -111,3 +111,45 @@ export { clearConfigCache, runPipeline, runPipelineAll } from "./src/pipeline.ts
 // =============================================================================
 
 export { loadPlugin, resolvePlugins } from "./src/plugins/mod.ts";
+
+// =============================================================================
+// Plugin Utilities (for plugin authors)
+// =============================================================================
+
+export {
+  collectFiles,
+  createTimer,
+  DEFAULT_COPY_FILES,
+  DEFAULT_ENTRY_POINT,
+  ensureDirectory,
+  escapeRegex,
+  failureResult,
+  getDirectory,
+  getOption,
+  getPackageName,
+  getPackageVersion,
+  getRelativePath,
+  matchGlob,
+  runCommand,
+  runDenoScript,
+  successResult,
+  transformFiles,
+  tryCopyFile,
+  validateArray,
+  validateBoolean,
+  validateDirectoryExists,
+  validateFileExists,
+  validateOneOf,
+  validateRequired,
+  validateString,
+} from "./src/plugins/utils.ts";
+
+export type {
+  CollectFilesOptions,
+  CommandResult,
+  CopyResult,
+  RunCommandOptions,
+  TransformFilesOptions,
+  ValidationError,
+  ValidationResult,
+} from "./src/plugins/utils.ts";
