@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://jsr.io/@hiisi/deno-dist/schemas/plugin.schema.json",
+  "title": "Deno Dist Plugin Metadata Schema",
+  "description": "Schema for deno-dist plugin metadata definitions",
+  "type": "object",
+  "required": ["id", "name", "version", "description", "targetRuntime"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$|^@this$",
+      "description": "Unique plugin identifier (kebab-case, e.g., 'deno-to-node')"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable plugin name"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "description": "Plugin version (semver)"
+    },
+    "description": {
+      "type": "string",
+      "description": "Brief description of what the plugin does"
+    },
+    "targetRuntime": {
+      "type": "string",
+      "enum": ["deno", "node", "bun", "any"],
+      "description": "Target runtime this plugin produces output for, or 'any' for lifecycle-only plugins"
+    },
+    "author": {
+      "type": "string",
+      "description": "Author or maintainer"
+    },
+    "license": {
+      "type": "string",
+      "description": "License identifier (SPDX)"
+    },
+    "repository": {
+      "type": "string",
+      "format": "uri",
+      "description": "Repository URL"
+    },
+    "homepage": {
+      "type": "string",
+      "format": "uri",
+      "description": "Plugin homepage or documentation URL"
+    },
+    "phases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["preprocess", "transform", "postprocess", "setup", "release"]
+      },
+      "uniqueItems": true,
+      "description": "Which phases this plugin implements. If not specified, all implemented methods are used."
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$|^jsr:|^npm:|^https?://"
+      },
+      "uniqueItems": true,
+      "description": "Plugin IDs that this plugin must run after"
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$|^jsr:|^npm:|^https?://"
+      },
+      "uniqueItems": true,
+      "description": "Plugin IDs that cannot be used together with this plugin"
+    },
+    "canParallelize": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether this plugin's phases can safely run in parallel with other parallelizable plugins"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true,
+      "description": "Tags for plugin discovery and categorization"
+    },
+    "options": {
+      "type": "object",
+      "description": "JSON Schema for plugin-specific options",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

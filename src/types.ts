@@ -2,16 +2,57 @@
  * @module types
  *
  * Core type definitions for deno-dist.
+ * This module defines all types for the plugin system, pipeline execution,
+ * and configuration.
  */
+
+// Re-export generated schema types
+export type {
+  BuildPhaseId,
+  CiConfig,
+  DistConfigSchema,
+  DistributionConfigSchema,
+  InlinePluginConfig,
+  LifecyclePhaseId,
+  PhaseId,
+  PluginMetadataSchema,
+  PluginReference,
+  PublishConfig,
+  RegistryConfig,
+  ReleaseNotesConfig,
+  RuntimeId,
+  TargetRuntime,
+  TestConfig,
+} from "./generated_types.ts";
+
+export {
+  BUILD_PHASE_IDS,
+  isBuildPhase,
+  isLifecyclePhase,
+  isPhaseId,
+  isRuntimeId,
+  LIFECYCLE_PHASE_IDS,
+  PHASE_IDS,
+  RUNTIME_IDS,
+} from "./generated_types.ts";
+
+import type {
+  BuildPhaseId,
+  CiConfig,
+  InlinePluginConfig,
+  PhaseId,
+  PluginMetadataSchema,
+  PluginReference,
+  PublishConfig,
+  ReleaseNotesConfig,
+  RuntimeId,
+  TargetRuntime,
+  TestConfig,
+} from "./generated_types.ts";
 
 // =============================================================================
 // Runtime Types
 // =============================================================================
-
-/**
- * Supported runtime identifiers.
- */
-export type RuntimeId = "deno" | "node" | "bun";
 
 /**
  * Runtime version specification.
@@ -23,9 +64,10 @@ export type RuntimeVersion = string;
 // =============================================================================
 
 /**
- * Plugin metadata for identification and discovery.
+ * Extended plugin metadata with runtime validation.
+ * This extends the schema-generated metadata with computed properties.
  */
-export interface PluginMetadata {
+export interface PluginMetadata extends PluginMetadataSchema {
   /** Unique plugin identifier (e.g., "deno-to-node", "deno-to-bun") */
   readonly id: string;
   /** Human-readable plugin name */
@@ -34,14 +76,8 @@ export interface PluginMetadata {
   readonly version: string;
   /** Brief description of what the plugin does */
   readonly description: string;
-  /** Target runtime this plugin produces output for */
-  readonly targetRuntime: RuntimeId;
-  /** Author or maintainer */
-  readonly author?: string;
-  /** License identifier */
-  readonly license?: string;
-  /** Repository URL */
-  readonly repository?: string;
+  /** Target runtime this plugin produces output for, or 'any' for lifecycle-only plugins */
+  readonly targetRuntime: TargetRuntime;
 }
 
 /**
@@ -54,24 +90,6 @@ export interface PluginConfig {
   readonly verbose?: boolean;
   /** Working directory for plugin operations */
   readonly workingDir?: string;
-}
-
-/**
- * Context provided to plugin hooks during execution.
- */
-export interface PluginContext {
-  /** The distribution configuration being processed */
-  readonly distConfig: DistributionConfig;
-  /** Source directory (input) */
-  readonly sourceDir: string;
-  /** Output directory for this distribution */
-  readonly outputDir: string;
-  /** Plugin-specific configuration */
-  readonly pluginConfig: PluginConfig;
-  /** Logging functions */
-  readonly log: LogFunctions;
-  /** Resolved template variables */
-  readonly variables: TemplateVariables;
 }
 
 /**
@@ -89,6 +107,93 @@ export interface LogFunctions {
 }
 
 /**
+ * Template variables available during processing.
+ *
+ * Variables are resolved in this order:
+ * 1. Capture variables (@{=name}) - from pattern matching
+ * 2. Environment variables (@{env.VAR}) - from Deno.env
+ * 3. Config variables (@{config.field}) - from deno.json
+ * 4. Custom variables (@{varName}) - from CLI --scope or metadata.dist.scope
+ */
+export interface TemplateVariables {
+  /** Environment variables (@{env.VAR_NAME}) */
+  readonly env: Record<string, string>;
+  /** Config values (@{config.field}) */
+  readonly config: Record<string, unknown>;
+  /** Capture variables (@{=varName}) - from pattern matching */
+  readonly captures: Record<string, string>;
+  /** Custom variables (@{varName}) - from CLI --scope or metadata.dist.scope */
+  readonly custom: Record<string, string>;
+}
+
+// =============================================================================
+// Context Types
+// =============================================================================
+
+/**
+ * Base context provided to all plugin phases.
+ */
+export interface BasePluginContext {
+  /** Source directory (input) */
+  readonly sourceDir: string;
+  /** Plugin-specific configuration */
+  readonly pluginConfig: PluginConfig;
+  /** Logging functions */
+  readonly log: LogFunctions;
+  /** Resolved template variables */
+  readonly variables: TemplateVariables;
+  /** Whether this is a dry run (no actual changes) */
+  readonly dryRun: boolean;
+}
+
+/**
+ * Context provided to build phase plugins (preprocess, transform, postprocess).
+ */
+export interface PluginContext extends BasePluginContext {
+  /** The distribution configuration being processed */
+  readonly distConfig: DistributionConfig;
+  /** Output directory for this distribution */
+  readonly outputDir: string;
+}
+
+/**
+ * Context provided to setup phase plugins.
+ */
+export interface SetupContext extends BasePluginContext {
+  /** The distribution configuration being processed */
+  readonly distConfig: DistributionConfig;
+  /** All distribution configurations (for generating combined workflows) */
+  readonly allDistConfigs: DistConfig;
+  /** Target file paths for generated files */
+  readonly outputPaths: {
+    /** Workflows directory (e.g., ".github/workflows") */
+    readonly workflowsDir: string;
+  };
+}
+
+/**
+ * Context provided to release phase plugins.
+ */
+export interface ReleaseContext extends BasePluginContext {
+  /** The distribution configuration being processed */
+  readonly distConfig: DistributionConfig;
+  /** Output directory containing the built distribution */
+  readonly outputDir: string;
+  /** Package version being released */
+  readonly version: string;
+  /** Release notes content (if generated) */
+  readonly releaseNotes?: string;
+  /** Previous version (for changelog generation) */
+  readonly previousVersion?: string;
+  /** Git tag for this release */
+  readonly tag?: string;
+}
+
+// =============================================================================
+// Result Types
+// =============================================================================
+
+/**
  * Result of a plugin phase execution.
  */
 export interface PluginPhaseResult {
@@ -103,6 +208,44 @@ export interface PluginPhaseResult {
   /** Duration of the phase in milliseconds */
   readonly durationMs?: number;
 }
+
+/**
+ * File operation for setup phase.
+ */
+export interface FileOperation {
+  /** File path relative to project root */
+  readonly path: string;
+  /** File content */
+  readonly content: string;
+  /** Operation type */
+  readonly action: "create" | "update" | "delete";
+}
+
+/**
+ * Result of a setup phase execution.
+ */
+export interface SetupResult extends PluginPhaseResult {
+  /** File operations performed */
+  readonly files?: readonly FileOperation[];
+}
+
+/**
+ * Result of a release phase execution.
+ */
+export interface ReleaseResult extends PluginPhaseResult {
+  /** Registry that was published to */
+  readonly registry?: string;
+  /** Version that was published */
+  readonly publishedVersion?: string;
+  /** URL to the published package */
+  readonly url?: string;
+  /** Release assets that were uploaded */
+  readonly assets?: readonly string[];
+}
+
+// =============================================================================
+// Plugin Interface
+// =============================================================================
 
 /**
  * Plugin interface for preprocess phase.
@@ -150,6 +293,36 @@ export interface PostprocessPlugin {
 }
 
 /**
+ * Plugin interface for setup phase.
+ * Generates project files like CI workflows.
+ */
+export interface SetupPlugin {
+  /** Plugin metadata */
+  readonly metadata: PluginMetadata;
+  /**
+   * Execute the setup phase.
+   * @param context Setup execution context
+   * @returns Result of the phase execution
+   */
+  setup(context: SetupContext): Promise<SetupResult>;
+}
+
+/**
+ * Plugin interface for release phase.
+ * Handles publishing to registries.
+ */
+export interface ReleasePlugin {
+  /** Plugin metadata */
+  readonly metadata: PluginMetadata;
+  /**
+   * Execute the release phase.
+   * @param context Release execution context
+   * @returns Result of the phase execution
+   */
+  release(context: ReleaseContext): Promise<ReleaseResult>;
+}
+
+/**
  * Full plugin interface implementing all phases.
  * Plugins may implement any subset of phases.
  */
@@ -162,22 +335,30 @@ export interface Plugin {
   transform?(context: PluginContext): Promise<PluginPhaseResult>;
   /** Postprocess phase (optional) */
   postprocess?(context: PluginContext): Promise<PluginPhaseResult>;
+  /** Setup phase (optional) */
+  setup?(context: SetupContext): Promise<SetupResult>;
+  /** Release phase (optional) */
+  release?(context: ReleaseContext): Promise<ReleaseResult>;
 }
 
 /**
- * Plugin reference in configuration.
- * Can be a string identifier or an inline plugin configuration.
+ * Type guard to check if a plugin implements a specific phase.
  */
-export type PluginReference = string | InlinePluginConfig;
+export function pluginImplementsPhase(plugin: Plugin, phase: PhaseId): boolean {
+  return typeof plugin[phase] === "function";
+}
 
 /**
- * Inline plugin configuration with ordering support.
+ * Get the list of phases a plugin implements.
  */
-export interface InlinePluginConfig {
-  /** Plugin identifier */
-  readonly id: string;
-  /** Plugin-specific options */
-  readonly options?: Record<string, unknown>;
+export function getPluginPhases(plugin: Plugin): readonly PhaseId[] {
+  const phases: PhaseId[] = [];
+  if (plugin.preprocess) phases.push("preprocess");
+  if (plugin.transform) phases.push("transform");
+  if (plugin.postprocess) phases.push("postprocess");
+  if (plugin.setup) phases.push("setup");
+  if (plugin.release) phases.push("release");
+  return phases;
 }
 
 // =============================================================================
@@ -192,6 +373,20 @@ export interface DistConfig {
   readonly distDir?: string;
   /** Named distribution configurations */
   readonly distributions: Record<string, DistributionConfig>;
+  /** Package metadata */
+  readonly metadata?: DistMetadata;
+}
+
+/**
+ * Dist-specific metadata.
+ */
+export interface DistMetadata {
+  /** Custom template variables available as @{varName} */
+  readonly scope?: Record<string, string>;
+  /** Default plugins to apply to all distributions */
+  readonly defaultPlugins?: readonly string[];
+  /** CI configuration */
+  readonly ci?: CiConfig;
 }
 
 /**
@@ -210,6 +405,10 @@ export interface DistributionConfig {
   readonly transform?: string;
   /** Path to custom postprocess script */
   readonly postprocess?: string;
+  /** Path to custom setup script */
+  readonly setup?: string;
+  /** Path to custom release script */
+  readonly release?: string;
   /** Template file mappings */
   readonly templates?: Record<string, string>;
   /** String replacement patterns */
@@ -218,79 +417,8 @@ export interface DistributionConfig {
   readonly test?: TestConfig;
   /** Publish configuration */
   readonly publish?: PublishConfig;
-}
-
-/**
- * Test configuration for a distribution.
- */
-export interface TestConfig {
-  /** Command to run tests */
-  readonly command?: string;
-  /** Additional setup commands */
-  readonly setup?: readonly string[];
-  /** Test timeout in milliseconds */
-  readonly timeout?: number;
-  /** Environment variables for testing */
-  readonly env?: Record<string, string>;
-}
-
-/**
- * Publish configuration for a distribution.
- */
-export interface PublishConfig {
-  /** Registry to publish to (e.g., "npm", "jsr") */
-  readonly registry?: string;
-  /** Whether to generate provenance */
-  readonly provenance?: boolean;
-  /** Access level ("public" or "restricted") */
-  readonly access?: "public" | "restricted";
-  /** Custom publish command */
-  readonly command?: string;
-}
-
-// =============================================================================
-// Template Types
-// =============================================================================
-
-/**
- * Template variables available during processing.
- *
- * Variables are resolved in this order:
- * 1. Capture variables (@{=name}) - from pattern matching
- * 2. Environment variables (@{env.VAR}) - from Deno.env
- * 3. Config variables (@{config.field}) - from deno.json
- * 4. Custom variables (@{varName}) - from CLI --scope or metadata.dist.scope
- */
-export interface TemplateVariables {
-  /** Environment variables (@{env.VAR_NAME}) */
-  readonly env: Record<string, string>;
-  /** Config values (@{config.field}) */
-  readonly config: Record<string, unknown>;
-  /** Capture variables (@{=varName}) - from pattern matching */
-  readonly captures: Record<string, string>;
-  /** Custom variables (@{varName}) - from CLI --scope or metadata.dist.scope */
-  readonly custom: Record<string, string>;
-}
-
-/**
- * Template insertion mode.
- */
-export type TemplateInsertionMode = "single" | "range";
-
-/**
- * Parsed template marker from source file.
- */
-export interface TemplateMarker {
-  /** Template name */
-  readonly name: string;
-  /** Insertion mode */
-  readonly mode: TemplateInsertionMode;
-  /** Position in source (for single) or start position (for range) */
-  readonly startIndex: number;
-  /** End position (for range mode) */
-  readonly endIndex?: number;
-  /** The full matched marker text */
-  readonly markerText: string;
+  /** Release notes configuration */
+  readonly releaseNotes?: ReleaseNotesConfig;
 }
 
 // =============================================================================
@@ -298,9 +426,10 @@ export interface TemplateMarker {
 // =============================================================================
 
 /**
- * Pipeline phase identifier.
+ * Pipeline phase identifier (for backwards compatibility).
+ * @deprecated Use PhaseId from generated_types instead
  */
-export type PipelinePhase = "preprocess" | "transform" | "postprocess";
+export type PipelinePhase = BuildPhaseId;
 
 /**
  * Result of a complete pipeline execution.
@@ -309,7 +438,7 @@ export interface PipelineResult {
   /** Whether the entire pipeline succeeded */
   readonly success: boolean;
   /** Results from each phase */
-  readonly phases: Record<PipelinePhase, PluginPhaseResult | undefined>;
+  readonly phases: Partial<Record<PhaseId, PluginPhaseResult>>;
   /** Total duration in milliseconds */
   readonly totalDurationMs: number;
   /** Distribution name that was built */
@@ -330,6 +459,93 @@ export interface PipelineOptions {
   readonly scope?: Record<string, string>;
   /** Whether to clean output directory before build */
   readonly clean?: boolean;
+  /** Whether to perform a dry run */
+  readonly dryRun?: boolean;
+  /** Specific phases to run (if not specified, runs all applicable phases) */
+  readonly phases?: readonly PhaseId[];
+}
+
+// =============================================================================
+// Graph Execution Types
+// =============================================================================
+
+/**
+ * An operation in the execution graph.
+ */
+export interface ExecutionOperation {
+  /** Unique operation ID */
+  readonly id: string;
+  /** Plugin to execute */
+  readonly plugin: Plugin;
+  /** Phase to execute */
+  readonly phase: PhaseId;
+  /** Distribution name */
+  readonly distribution: string;
+  /** Plugin configuration */
+  readonly config: InlinePluginConfig;
+}
+
+/**
+ * A wave of operations that can execute in parallel.
+ */
+export interface ExecutionWave {
+  /** Wave index (0-based) */
+  readonly index: number;
+  /** Operations in this wave */
+  readonly operations: readonly ExecutionOperation[];
+}
+
+/**
+ * The complete execution graph.
+ */
+export interface ExecutionGraph {
+  /** Waves of parallel operations, executed sequentially */
+  readonly waves: readonly ExecutionWave[];
+  /** Total number of operations */
+  readonly totalOperations: number;
+  /** Whether the graph has any cycles (should always be false) */
+  readonly hasCycles: boolean;
+  /** Dependency edges for debugging */
+  readonly edges: ReadonlyMap<string, readonly string[]>;
+}
+
+/**
+ * Result of graph execution.
+ */
+export interface GraphExecutionResult {
+  /** Whether all operations succeeded */
+  readonly success: boolean;
+  /** Results by operation ID */
+  readonly results: ReadonlyMap<string, PluginPhaseResult>;
+  /** Operations that failed */
+  readonly failed: readonly string[];
+  /** Total duration in milliseconds */
+  readonly totalDurationMs: number;
+}
+
+// =============================================================================
+// Template Types
+// =============================================================================
+
+/**
+ * Template insertion mode.
+ */
+export type TemplateInsertionMode = "single" | "range";
+
+/**
+ * Parsed template marker from source file.
+ */
+export interface TemplateMarker {
+  /** Template name */
+  readonly name: string;
+  /** Insertion mode */
+  readonly mode: TemplateInsertionMode;
+  /** Position in source (for single) or start position (for range) */
+  readonly startIndex: number;
+  /** End position (for range mode) */
+  readonly endIndex?: number;
+  /** The full matched marker text */
+  readonly markerText: string;
 }
 
 // =============================================================================
@@ -481,8 +697,22 @@ export class PipelineError extends DistError {
 
   constructor(
     message: string,
-    public readonly phase: PipelinePhase,
+    public readonly phase: PhaseId,
   ) {
     super(message, "PIPELINE_ERROR");
+  }
+}
+
+/**
+ * Graph execution error.
+ */
+export class GraphError extends DistError {
+  override readonly name: string = "GraphError";
+
+  constructor(
+    message: string,
+    public readonly operationId?: string,
+  ) {
+    super(message, "GRAPH_ERROR");
   }
 }

@@ -16,8 +16,10 @@
 
 - Build for Deno, Node.js, or Bun
 - Use built-in plugins or write your own
-- Generate GitHub Actions workflows automatically
+- Graph-based parallel execution for faster builds
+- Plugin-driven setup (CI workflows) and release (publishing)
 - Template your README with runtime-specific content
+- JSON schemas for configuration validation
 
 ## Installation
 
@@ -55,17 +57,17 @@ deno task dist build node
     "node": {
       "runtime": "node",
       "versions": ["18", "20", "22"],
-      "plugins": ["deno-to-node"]
+      "plugins": ["deno-to-node", "github-actions"]
     },
     "bun": {
       "runtime": "bun",
       "versions": ["latest"],
-      "plugins": ["deno-to-bun"]
+      "plugins": ["deno-to-bun", "github-actions"]
     },
     "deno": {
       "runtime": "deno",
       "versions": ["v2.x"],
-      "plugins": ["deno-passthrough"]
+      "plugins": ["deno-passthrough", "github-actions"]
     }
   }
 }
@@ -80,35 +82,51 @@ deno-dist build node
 # Build all distributions
 deno-dist build --all
 
+# Build with graph-based parallel execution
+deno-dist graph --all
+
 # With verbose output
 deno-dist build node --verbose
 
 # Clean output directory first
 deno-dist build node --clean
+
+# Dry run (show what would happen)
+deno-dist build node --dry-run
 ```
 
-### 3. Validate your configuration
+### 3. Generate CI workflows
+
+```bash
+# Run setup phase to generate workflows
+deno-dist setup --all
+```
+
+### 4. Publish releases
+
+```bash
+# Run release phase
+deno-dist release node --tag v1.0.0
+
+# With release notes
+deno-dist release node --tag v1.0.0 --notes CHANGELOG.md
+```
+
+### 5. Validate your configuration
 
 ```bash
 deno-dist validate
 ```
 
-### 4. Generate GitHub Actions workflows
-
-```bash
-deno-dist update-workflows
-```
-
-This generates test and publish workflows for each distribution.
-
 ## Configuration
 
 ### Root-level fields
 
-| Field     | Type     | Default    | Description                            |
-| --------- | -------- | ---------- | -------------------------------------- |
-| `distDir` | `string` | `"target"` | Output directory for all distributions |
-| `dist`    | `object` | `{}`       | Named distribution configurations      |
+| Field      | Type     | Default    | Description                            |
+| ---------- | -------- | ---------- | -------------------------------------- |
+| `distDir`  | `string` | `"target"` | Output directory for all distributions |
+| `dist`     | `object` | `{}`       | Named distribution configurations      |
+| `metadata` | `object` | `{}`       | Package metadata including dist config |
 
 ### Distribution fields
 
@@ -120,10 +138,13 @@ This generates test and publish workflows for each distribution.
 | `preprocess`   | `string`                    | Path to custom preprocess script       |
 | `transform`    | `string`                    | Path to custom transform script        |
 | `postprocess`  | `string`                    | Path to custom postprocess script      |
+| `setup`        | `string`                    | Path to custom setup script            |
+| `release`      | `string`                    | Path to custom release script          |
 | `templates`    | `Record<string, string>`    | Template file mappings                 |
 | `replacements` | `Record<string, string>`    | String replacement patterns            |
 | `test`         | `object`                    | Test configuration                     |
 | `publish`      | `object`                    | Publish configuration                  |
+| `releaseNotes` | `object`                    | Release notes configuration            |
 
 ### Test configuration
 
@@ -133,7 +154,8 @@ This generates test and publish workflows for each distribution.
     "command": "npm test",
     "setup": ["npm install"],
     "timeout": 30000,
-    "env": { "NODE_ENV": "test" }
+    "env": { "NODE_ENV": "test" },
+    "enabled": true
   }
 }
 ```
@@ -143,30 +165,86 @@ This generates test and publish workflows for each distribution.
 ```json
 {
   "publish": {
-    "registry": "npm",
+    "registries": ["npm", "github-release"],
     "provenance": true,
-    "access": "public"
+    "access": "public",
+    "dryRun": false
   }
 }
 ```
 
+### Metadata configuration
+
+```json
+{
+  "metadata": {
+    "dist": {
+      "scope": {
+        "author": "Your Name",
+        "year": "2024"
+      },
+      "defaultPlugins": ["github-actions"],
+      "ci": {
+        "provider": "github",
+        "branchName": "main",
+        "testWorkflow": true,
+        "releaseWorkflow": true
+      }
+    }
+  }
+}
+```
+
+## Plugin Phases
+
+Plugins can implement any combination of five phases:
+
+### Build Phases (sequential per plugin)
+
+1. **preprocess** - Prepare the source before transformation
+2. **transform** - Main code transformation (e.g., Deno to Node)
+3. **postprocess** - Clean up and optimize after transformation
+
+### Lifecycle Phases (independent)
+
+4. **setup** - Generate project files (CI workflows, configs)
+5. **release** - Publish to registries (npm, JSR, GitHub Releases)
+
 ## Built-in Plugins
 
-### deno-to-node
+### Build Plugins
 
-Transforms Deno code to Node.js using [dnt](https://github.com/denoland/dnt).
+| Plugin             | Phases                             | Description                          |
+| ------------------ | ---------------------------------- | ------------------------------------ |
+| `deno-to-node`     | preprocess, transform, postprocess | Transform Deno code to Node.js (dnt) |
+| `deno-to-bun`      | preprocess, transform, postprocess | Transform Deno code for Bun          |
+| `deno-passthrough` | preprocess, transform, postprocess | Copy Deno code as-is                 |
 
-### deno-to-bun
+### Lifecycle Plugins
 
-Transforms Deno code for Bun with import remapping and API shims.
+| Plugin           | Phases | Description                       |
+| ---------------- | ------ | --------------------------------- |
+| `github-actions` | setup  | Generate GitHub Actions workflows |
 
-### deno-passthrough
+## Graph-Based Execution
 
-Copies Deno code as-is with optional cleanup (strips tests, etc).
+The `graph` command builds an execution graph and runs operations in parallel where possible:
+
+```bash
+# Build all distributions with parallel execution
+deno-dist graph --all --verbose
+```
+
+The graph engine:
+
+- Analyzes plugin dependencies
+- Groups independent operations into parallel waves
+- Respects declared dependencies between plugins
+- Maintains phase ordering (preprocess -> transform -> postprocess)
 
 ## Custom Scripts
 
-Use `@this` in the plugins array to control where your custom scripts run in the pipeline:
+Use `@this` in the plugins array to control where your custom scripts run:
 
 ```json
 {
@@ -174,7 +252,9 @@ Use `@this` in the plugins array to control where your custom scripts run in the
     "node": {
       "runtime": "node",
       "plugins": ["deno-to-node", "@this"],
-      "postprocess": "./scripts/post_node.ts"
+      "postprocess": "./scripts/post_node.ts",
+      "setup": "./scripts/setup_node.ts",
+      "release": "./scripts/release_node.ts"
     }
   }
 }
@@ -183,13 +263,46 @@ Use `@this` in the plugins array to control where your custom scripts run in the
 Custom script interface:
 
 ```typescript
-import type { PluginContext, PluginPhaseResult } from "@hiisi/deno-dist";
+import type {
+  PluginContext,
+  PluginPhaseResult,
+  ReleaseContext,
+  ReleaseResult,
+  SetupContext,
+  SetupResult,
+} from "@hiisi/deno-dist";
 
+// Build phase script
 export async function postprocess(
   context: PluginContext,
 ): Promise<PluginPhaseResult> {
   context.log.info("Running custom postprocess...");
   return { success: true };
+}
+
+// Setup phase script
+export async function setup(
+  context: SetupContext,
+): Promise<SetupResult> {
+  context.log.info("Running custom setup...");
+  return {
+    success: true,
+    files: [
+      { path: ".github/custom.yml", content: "...", action: "create" },
+    ],
+  };
+}
+
+// Release phase script
+export async function release(
+  context: ReleaseContext,
+): Promise<ReleaseResult> {
+  context.log.info(`Releasing version ${context.version}...`);
+  return {
+    success: true,
+    registry: "custom",
+    publishedVersion: context.version,
+  };
 }
 ```
 
@@ -259,55 +372,96 @@ Content to be replaced
 ## Programmatic API
 
 ```typescript
-import { loadDistConfig, runPipeline, runPipelineAll, validateConfig } from "@hiisi/deno-dist";
+import {
+  buildExecutionGraph,
+  loadDistConfig,
+  runPipeline,
+  runPipelineGraph,
+  runRelease,
+  runSetup,
+  validateConfig,
+  visualizeGraph,
+} from "@hiisi/deno-dist";
 
+// Load and validate config
 const config = await loadDistConfig("./deno.json");
-
 const validation = validateConfig(config);
 if (!validation.valid) {
   console.error(validation.errors);
   Deno.exit(1);
 }
 
+// Build a single distribution (legacy sequential)
 const result = await runPipeline("node", config, {
   verbose: true,
   clean: true,
 });
 
-if (result.success) {
-  console.log(`Built to: ${result.outputDir}`);
-}
+// Build all distributions with graph execution (parallel)
+const results = await runPipelineGraph(config, {
+  verbose: true,
+  clean: true,
+});
+
+// Run setup phase only
+await runSetup(config);
+
+// Run release phase
+await runRelease(config, {
+  version: "1.0.0",
+  tag: "v1.0.0",
+});
+
+// Visualize the execution graph
+import { buildExecutionGraph, visualizeGraph } from "@hiisi/deno-dist";
+const graph = buildExecutionGraph(plugins, { distributions: ["node", "bun"] });
+console.log(visualizeGraph(graph));
 ```
 
 ## CLI Reference
 
 ```
-deno-dist v0.2.1
+deno-dist v0.3.0
 
 USAGE:
   deno-dist <command> [options]
 
 COMMANDS:
   build [name]        Build a distribution (or all with --all)
+  setup [name]        Run setup phase (generate workflows, etc.)
+  release [name]      Run release phase (publish to registries)
+  graph [name]        Build using graph execution (parallel where possible)
   validate            Validate distribution configuration
-  update-workflows    Generate GitHub Actions workflows
 
 OPTIONS:
   -h, --help          Show help
   -v, --version       Show version
   --verbose           Verbose output
   --clean             Clean output directory before build
+  --dry-run, -n       Show what would be done without making changes
   --scope <vars>      Custom variables (key=value,key2=value2)
   --config <path>     Path to deno.json (default: ./deno.json)
-  --all               Build all distributions
+  --all               Process all distributions
+
+RELEASE OPTIONS:
+  --tag <tag>         Git tag for release
+  --notes <file>      Path to release notes file
 ```
 
 ## Writing Plugins
 
-Plugins can be published as packages. The plugin interface lives in the package's default export:
+Plugins can implement any subset of phases. The plugin interface:
 
 ```typescript
-import type { Plugin, PluginContext, PluginPhaseResult } from "@hiisi/deno-dist";
+import type {
+  Plugin,
+  PluginContext,
+  PluginPhaseResult,
+  ReleaseContext,
+  ReleaseResult,
+  SetupContext,
+  SetupResult,
+} from "@hiisi/deno-dist";
 
 const myPlugin: Plugin = {
   metadata: {
@@ -316,24 +470,60 @@ const myPlugin: Plugin = {
     version: "1.0.0",
     description: "Does something useful",
     targetRuntime: "node",
+    // Declare which phases this plugin implements
+    phases: ["transform", "setup", "release"],
+    // Declare dependencies on other plugins
+    dependencies: ["deno-to-node"],
+    // Declare conflicts with other plugins
+    conflicts: ["deno-to-bun"],
+    // Allow parallel execution with other plugins
+    canParallelize: false,
   },
 
   async transform(context: PluginContext): Promise<PluginPhaseResult> {
     context.log.info("Transforming...");
     return { success: true };
   },
+
+  async setup(context: SetupContext): Promise<SetupResult> {
+    context.log.info("Setting up...");
+    return {
+      success: true,
+      files: [
+        { path: ".github/workflows/my-workflow.yml", content: "...", action: "create" },
+      ],
+    };
+  },
+
+  async release(context: ReleaseContext): Promise<ReleaseResult> {
+    context.log.info(`Releasing ${context.version}...`);
+    return {
+      success: true,
+      registry: "my-registry",
+      publishedVersion: context.version,
+      url: "https://...",
+    };
+  },
 };
 
 export default myPlugin;
 ```
 
-Reference plugins by their JSR/npm specifier in your config:
+Reference plugins by their JSR/npm specifier:
 
 ```json
 {
   "plugins": ["jsr:@someone/my-plugin"]
 }
 ```
+
+## JSON Schemas
+
+This package includes JSON schemas for configuration validation:
+
+- `schemas/config.schema.json` - Main configuration schema
+- `schemas/distribution.schema.json` - Distribution configuration schema
+- `schemas/plugin.schema.json` - Plugin metadata schema
 
 ## Support
 

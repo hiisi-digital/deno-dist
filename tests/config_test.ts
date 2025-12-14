@@ -340,18 +340,18 @@ describe("validateConfig", () => {
     );
   });
 
-  it("should warn on non-.ts script paths", () => {
+  it("should warn on non-.ts or .js script paths", () => {
     const config = {
       distDir: "target",
       distributions: {
         node: {
           runtime: "node" as const,
-          transform: "./transform.js",
+          transform: "./transform.py",
         },
       },
     };
     const result = validateConfig(config);
-    assertEquals(result.warnings.some((w) => w.includes(".ts file")), true);
+    assertEquals(result.warnings.some((w) => w.includes(".ts or .js file")), true);
   });
 
   it("should error on empty template path", () => {

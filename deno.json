@@ -1,6 +1,6 @@
 {
   "name": "@hiisi/deno-dist",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "license": "MPL-2.0",
 
   "exports": {
@@ -70,14 +70,16 @@
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",
     "check": "deno check mod.ts",
+    "codegen": "deno run -A scripts/codegen.ts",
     "all": "deno task fmt && deno task lint && deno task check && deno task test",
-    "prepublish": "deno task all",
+    "prepublish": "deno task codegen && deno task all",
     "dist": "deno run --allow-read --allow-write --allow-env --allow-run src/cli.ts"
   },
   "publish": {
     "include": [
       "mod.ts",
       "src/**/*.ts",
+      "schemas/**/*.json",
       "README.md",
       "LICENSE"
     ],

@@ -6,10 +6,13 @@
 
 import { parse as parseJsonc } from "@std/jsonc";
 import type {
+  CiConfig,
   DistConfig,
+  DistMetadata,
   DistributionConfig,
   PluginReference,
   PublishConfig,
+  ReleaseNotesConfig,
   RuntimeId,
   TestConfig,
 } from "./types.ts";
@@ -45,6 +48,18 @@ interface RawDenoJson {
  * Raw dist configuration from deno.json.
  */
 interface RawDistConfig {
+  [key: string]: unknown;
+}
+
+/**
+ * Raw metadata configuration from deno.json.
+ */
+interface RawMetadata {
+  dist?: {
+    scope?: Record<string, unknown>;
+    defaultPlugins?: unknown[];
+    ci?: Record<string, unknown>;
+  };
   [key: string]: unknown;
 }
 
@@ -161,8 +176,9 @@ export function parseDistConfig(content: string, sourcePath?: string): DistConfi
 
   const distDir = typeof raw.distDir === "string" ? raw.distDir : DEFAULT_DIST_DIR;
   const distributions = parseDistributions(raw.dist as RawDistConfig | undefined);
+  const metadata = parseMetadata((raw as { metadata?: RawMetadata }).metadata);
 
-  return { distDir, distributions };
+  return { distDir, distributions, metadata };
 }
 
 /**
@@ -200,10 +216,86 @@ function parseDistributionConfig(
     preprocess: toOptionalString(raw.preprocess),
     transform: toOptionalString(raw.transform),
     postprocess: toOptionalString(raw.postprocess),
+    setup: toOptionalString(raw.setup),
+    release: toOptionalString(raw.release),
     templates: toStringRecord(raw.templates, "templates"),
     replacements: toStringRecord(raw.replacements, "replacements"),
     test: parseTestConfig(raw.test),
     publish: parsePublishConfig(raw.publish),
+    releaseNotes: parseReleaseNotesConfig(raw.releaseNotes),
+  };
+}
+
+/**
+ * Parse metadata configuration.
+ */
+function parseMetadata(raw: RawMetadata | undefined): DistMetadata | undefined {
+  if (!isObject(raw)) {
+    return undefined;
+  }
+
+  const distMeta = raw.dist;
+  if (!isObject(distMeta)) {
+    return undefined;
+  }
+
+  return {
+    scope: toStringRecord(distMeta.scope, "metadata.dist.scope"),
+    defaultPlugins: Array.isArray(distMeta.defaultPlugins)
+      ? distMeta.defaultPlugins.map(String)
+      : undefined,
+    ci: parseCiConfig(distMeta.ci),
+  };
+}
+
+/**
+ * Parse CI configuration.
+ */
+function parseCiConfig(value: unknown): CiConfig | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+
+  const provider = value.provider as string | undefined;
+  const validProviders = ["github", "gitlab", "codeberg", "custom"];
+
+  return {
+    provider: provider && validProviders.includes(provider)
+      ? provider as "github" | "gitlab" | "codeberg" | "custom"
+      : undefined,
+    workflowsDir: toOptionalString(value.workflowsDir),
+    testWorkflow: typeof value.testWorkflow === "boolean" ? value.testWorkflow : undefined,
+    releaseWorkflow: typeof value.releaseWorkflow === "boolean" ? value.releaseWorkflow : undefined,
+    branchName: toOptionalString(value.branchName),
+    concurrency: isObject(value.concurrency)
+      ? {
+        group: toOptionalString(value.concurrency.group),
+        cancelInProgress: typeof value.concurrency.cancelInProgress === "boolean"
+          ? value.concurrency.cancelInProgress
+          : undefined,
+      }
+      : undefined,
+  };
+}
+
+/**
+ * Parse release notes configuration.
+ */
+function parseReleaseNotesConfig(value: unknown): ReleaseNotesConfig | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+
+  const generate = value.generate as string | undefined;
+  const validGenerateMethods = ["conventional", "changelog", "git-log", "custom"];
+
+  return {
+    template: toOptionalString(value.template),
+    generate: generate && validGenerateMethods.includes(generate)
+      ? generate as "conventional" | "changelog" | "git-log" | "custom"
+      : undefined,
+    include: Array.isArray(value.include) ? value.include.map(String) : undefined,
+    exclude: Array.isArray(value.exclude) ? value.exclude.map(String) : undefined,
   };
 }
 
@@ -364,10 +456,10 @@ function validateDistribution(
   }
 
   // Validate custom script paths
-  for (const field of ["preprocess", "transform", "postprocess"] as const) {
+  for (const field of ["preprocess", "transform", "postprocess", "setup", "release"] as const) {
     const path = dist[field];
-    if (path && !path.endsWith(".ts")) {
-      warnings.push(`${prefix}: ${field} path "${path}" should be a .ts file`);
+    if (path && !path.endsWith(".ts") && !path.endsWith(".js")) {
+      warnings.push(`${prefix}: ${field} path "${path}" should be a .ts or .js file`);
     }
   }
 
@@ -405,11 +497,15 @@ function validatePluginConfig(
     (typeof p === "string" && p === "@this") ||
     (typeof p === "object" && p.id === "@this")
   );
-  const hasCustomScript = dist.preprocess || dist.transform || dist.postprocess;
+  const hasCustomScript = dist.preprocess ||
+    dist.transform ||
+    dist.postprocess ||
+    dist.setup ||
+    dist.release;
 
   if (hasThis && !hasCustomScript) {
     warnings.push(
-      `${prefix}: @this in plugins but no custom preprocess/transform/postprocess defined`,
+      `${prefix}: @this in plugins but no custom scripts defined`,
     );
   }
   if (hasCustomScript && !hasThis) {

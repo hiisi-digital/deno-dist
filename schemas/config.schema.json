@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://jsr.io/@hiisi/deno-dist/schemas/config.schema.json",
+  "title": "Deno Dist Configuration Schema",
+  "description": "Schema for deno-dist configuration in deno.json",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Package name (used for publishing)"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "description": "Package version (semver)"
+    },
+    "distDir": {
+      "type": "string",
+      "default": "target",
+      "pattern": "^(?!/)(?!.*\\.\\.).*$",
+      "description": "Output directory for all distributions (relative path, no '..')"
+    },
+    "dist": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "distribution.schema.json#"
+      },
+      "description": "Named distribution configurations"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "dist": {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Custom template variables available as @{varName}"
+            },
+            "defaultPlugins": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Default plugins to apply to all distributions"
+            },
+            "ci": {
+              "$ref": "#/$defs/ciConfig"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true,
+      "description": "Package metadata including dist-specific settings"
+    }
+  },
+  "$defs": {
+    "ciConfig": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["github", "gitlab", "codeberg", "custom"],
+          "default": "github",
+          "description": "CI provider for workflow generation"
+        },
+        "workflowsDir": {
+          "type": "string",
+          "description": "Directory for CI workflow files (defaults to provider-specific path)"
+        },
+        "testWorkflow": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to generate test workflows"
+        },
+        "releaseWorkflow": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to generate release workflows"
+        },
+        "branchName": {
+          "type": "string",
+          "default": "main",
+          "description": "Main branch name for CI triggers"
+        },
+        "concurrency": {
+          "type": "object",
+          "properties": {
+            "group": {
+              "type": "string",
+              "description": "Concurrency group pattern"
+            },
+            "cancelInProgress": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether to cancel in-progress runs"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtimeId": {
+      "type": "string",
+      "enum": ["deno", "node", "bun"],
+      "description": "Supported runtime identifiers"
+    },
+    "phaseId": {
+      "type": "string",
+      "enum": ["preprocess", "transform", "postprocess", "setup", "release"],
+      "description": "Pipeline phase identifiers"
+    },
+    "pluginReference": {
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Plugin identifier (built-in, JSR, npm, or file path)"
+        },
+        {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Plugin identifier"
+            },
+            "options": {
+              "type": "object",
+              "additionalProperties": true,
+              "description": "Plugin-specific options"
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether this plugin is enabled"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

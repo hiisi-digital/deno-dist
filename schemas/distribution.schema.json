@@ -1,0 +1,239 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://jsr.io/@hiisi/deno-dist/schemas/distribution.schema.json",
+  "title": "Deno Dist Distribution Configuration Schema",
+  "description": "Schema for a single distribution target configuration",
+  "type": "object",
+  "required": ["runtime"],
+  "properties": {
+    "runtime": {
+      "type": "string",
+      "enum": ["deno", "node", "bun"],
+      "description": "Target runtime identifier"
+    },
+    "versions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Runtime versions to test against (e.g., ['18', '20', '22'] for Node.js)"
+    },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Plugin identifier (built-in, JSR, npm, or file path)"
+          },
+          {
+            "$ref": "#/$defs/inlinePluginConfig"
+          }
+        ]
+      },
+      "description": "Plugins to apply. Use '@this' to control custom script ordering."
+    },
+    "preprocess": {
+      "type": "string",
+      "pattern": "\\.(ts|js|mts|mjs)$",
+      "description": "Path to custom preprocess script"
+    },
+    "transform": {
+      "type": "string",
+      "pattern": "\\.(ts|js|mts|mjs)$",
+      "description": "Path to custom transform script"
+    },
+    "postprocess": {
+      "type": "string",
+      "pattern": "\\.(ts|js|mts|mjs)$",
+      "description": "Path to custom postprocess script"
+    },
+    "setup": {
+      "type": "string",
+      "pattern": "\\.(ts|js|mts|mjs)$",
+      "description": "Path to custom setup script"
+    },
+    "release": {
+      "type": "string",
+      "pattern": "\\.(ts|js|mts|mjs)$",
+      "description": "Path to custom release script"
+    },
+    "templates": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Template file mappings (name -> file path)"
+    },
+    "replacements": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "String replacement patterns (pattern -> replacement)"
+    },
+    "test": {
+      "$ref": "#/$defs/testConfig"
+    },
+    "publish": {
+      "$ref": "#/$defs/publishConfig"
+    },
+    "releaseNotes": {
+      "$ref": "#/$defs/releaseNotesConfig"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "inlinePluginConfig": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Plugin identifier"
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Plugin-specific options"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether this plugin is enabled"
+        }
+      },
+      "additionalProperties": false
+    },
+    "testConfig": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Command to run tests"
+        },
+        "setup": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Setup commands to run before tests"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Test timeout in milliseconds"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables for testing"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether tests are enabled for this distribution"
+        }
+      },
+      "additionalProperties": false
+    },
+    "publishConfig": {
+      "type": "object",
+      "properties": {
+        "registries": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "Registry identifier (e.g., 'npm', 'jsr', 'github')"
+              },
+              {
+                "$ref": "#/$defs/registryConfig"
+              }
+            ]
+          },
+          "description": "Registries to publish to. Supports multiple registries per distribution."
+        },
+        "registry": {
+          "type": "string",
+          "description": "DEPRECATED: Use 'registries' instead. Single registry to publish to.",
+          "deprecated": true
+        },
+        "provenance": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether to generate provenance attestations"
+        },
+        "access": {
+          "type": "string",
+          "enum": ["public", "restricted"],
+          "default": "public",
+          "description": "Access level for the published package"
+        },
+        "command": {
+          "type": "string",
+          "description": "Custom publish command (overrides registry-specific commands)"
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether to perform a dry run without actually publishing"
+        }
+      },
+      "additionalProperties": false
+    },
+    "registryConfig": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Registry identifier or plugin ID (e.g., 'npm', 'jsr', 'github-release')"
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Registry-specific options"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether this registry is enabled"
+        }
+      },
+      "additionalProperties": false
+    },
+    "releaseNotesConfig": {
+      "type": "object",
+      "properties": {
+        "template": {
+          "type": "string",
+          "description": "Path to release notes template file"
+        },
+        "generate": {
+          "type": "string",
+          "enum": ["conventional", "changelog", "git-log", "custom"],
+          "description": "Method to generate release notes"
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Commit types to include in generated notes"
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Commit types to exclude from generated notes"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

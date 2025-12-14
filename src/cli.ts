@@ -2,50 +2,27 @@
  * @module cli
  *
  * CLI entry point for deno-dist.
- * Provides commands for building distributions, validating config, and updating workflows.
+ * Provides commands for building distributions, validating config,
+ * running setup, and publishing releases.
  */
 
 import { parseArgs } from "@std/cli";
 import { loadDistConfig, validateConfig } from "./config.ts";
-import { runPipeline, runPipelineAll } from "./pipeline.ts";
-import type { CliArgs, CliCommand, PipelineOptions, RuntimeId } from "./types.ts";
+import {
+  type ExtendedPipelineOptions,
+  runBuild,
+  runPipeline,
+  runPipelineAll,
+  runRelease,
+  runSetup,
+} from "./pipeline.ts";
+import type { CliArgs, CliCommand, DistConfig, PipelineOptions } from "./types.ts";
 
 // =============================================================================
 // Constants
 // =============================================================================
 
 const PROGRAM_NAME = "deno-dist";
-
-// Runtime configuration maps - consolidated switch statement logic
-const RUNTIME_SETUP_ACTIONS: Readonly<Record<RuntimeId, string>> = {
-  deno: "denoland/setup-deno@v2",
-  node: "actions/setup-node@v4",
-  bun: "oven-sh/setup-bun@v2",
-};
-
-const RUNTIME_VERSION_KEYS: Readonly<Record<RuntimeId, string>> = {
-  deno: "deno-version",
-  node: "node-version",
-  bun: "bun-version",
-};
-
-const RUNTIME_TEST_COMMANDS: Readonly<Record<RuntimeId, string>> = {
-  deno: "deno test",
-  node: "npm test",
-  bun: "bun test",
-};
-
-const RUNTIME_DEFAULT_VERSIONS: Readonly<Record<RuntimeId, readonly string[]>> = {
-  deno: ["v2.x"],
-  node: ["18", "20", "22"],
-  bun: ["latest"],
-};
-
-const RUNTIME_DEFAULT_REGISTRIES: Readonly<Record<RuntimeId, string>> = {
-  deno: "jsr",
-  node: "npm",
-  bun: "npm",
-};
 
 // =============================================================================
 // Version Loading
@@ -114,27 +91,36 @@ ${PROGRAM_NAME} v${version}
 Universal distribution tool for Deno projects
 
 USAGE:
-  deno task dist <command> [options]
+  deno-dist <command> [options]
 
 COMMANDS:
   build [name]        Build a distribution (or all with --all)
+  setup [name]        Run setup phase (generate workflows, etc.)
+  release [name]      Run release phase (publish to registries)
   validate            Validate distribution configuration
-  update-workflows    Generate GitHub Actions workflows
+  graph [name]        Build using graph execution (parallel where possible)
 
 OPTIONS:
   -h, --help          Show this help message
   -v, --version       Show version
   --verbose           Enable verbose output
   --clean             Clean output directory before build
+  --dry-run           Show what would be done without making changes
   --scope <vars>      Provide template variables (key=value,key2=value2)
   --config <path>     Path to deno.json (default: ./deno.json)
-  --all               Build all distributions
+  --all               Process all distributions
+
+RELEASE OPTIONS:
+  --tag <tag>         Git tag for release
+  --notes <file>      Path to release notes file
 
 EXAMPLES:
-  deno task dist build node
-  deno task dist build --all --clean
-  deno task dist validate
-  deno task dist update-workflows
+  deno-dist build node
+  deno-dist build --all --clean
+  deno-dist setup --all
+  deno-dist release node --tag v1.0.0
+  deno-dist validate
+  deno-dist graph --all --verbose
 `;
 }
 
@@ -147,11 +133,12 @@ EXAMPLES:
  */
 function parseCliArgs(args: string[]): CliArgs {
   const parsed = parseArgs(args, {
-    boolean: ["help", "version", "verbose", "clean", "all"],
-    string: ["scope", "config"],
+    boolean: ["help", "version", "verbose", "clean", "all", "dry-run"],
+    string: ["scope", "config", "tag", "notes"],
     alias: {
       h: "help",
       v: "version",
+      n: "dry-run",
     },
     default: {
       config: "deno.json",
@@ -173,7 +160,10 @@ function parseCliArgs(args: string[]): CliArgs {
       verbose: parsed.verbose ?? false,
       clean: parsed.clean ?? false,
       all: parsed.all ?? false,
+      dryRun: parsed["dry-run"] ?? false,
       config: parsed.config ?? "deno.json",
+      tag: parsed.tag,
+      notes: parsed.notes,
     },
     scope,
   };
@@ -200,6 +190,98 @@ function parseScopeString(scopeStr: string | undefined): Record<string, string> 
 }
 
 // =============================================================================
+// Shared Helpers
+// =============================================================================
+
+/**
+ * Result of config loading and validation.
+ */
+interface ConfigLoadResult {
+  success: boolean;
+  config: DistConfig;
+}
+
+/**
+ * Load and validate configuration, logging errors.
+ */
+async function loadAndValidateConfig(configPath: string): Promise<ConfigLoadResult> {
+  let config;
+  try {
+    config = await loadDistConfig(configPath);
+  } catch (error) {
+    logger.error(`Failed to load config: ${String(error)}`);
+    return { success: false, config: { distDir: "target", distributions: {} } };
+  }
+
+  const validation = validateConfig(config);
+  if (!validation.valid) {
+    logger.error("Configuration errors:");
+    for (const err of validation.errors) {
+      logger.error(`  - ${err}`);
+    }
+    return { success: false, config };
+  }
+
+  for (const warning of validation.warnings) {
+    logger.warn(`Warning: ${warning}`);
+  }
+
+  return { success: true, config };
+}
+
+/**
+ * Get the target distribution(s) from args.
+ * Returns null if validation fails.
+ */
+function getTargetDistributions(
+  args: CliArgs,
+  config: DistConfig,
+): readonly string[] | null {
+  const buildAll = args.flags.all as boolean;
+
+  if (buildAll) {
+    return Object.keys(config.distributions);
+  }
+
+  const distName = args.positional[0];
+  if (!distName) {
+    logger.error("Error: Distribution name required. Use --all to process all.");
+    logger.error(`Available distributions: ${Object.keys(config.distributions).join(", ")}`);
+    return null;
+  }
+
+  if (!config.distributions[distName]) {
+    logger.error(`Error: Distribution "${distName}" not found.`);
+    logger.error(`Available distributions: ${Object.keys(config.distributions).join(", ")}`);
+    return null;
+  }
+
+  return [distName];
+}
+
+/**
+ * Create pipeline options from CLI args.
+ */
+function createPipelineOptions(args: CliArgs): PipelineOptions {
+  return {
+    verbose: args.flags.verbose as boolean,
+    clean: args.flags.clean as boolean,
+    scope: args.scope,
+    dryRun: args.flags.dryRun as boolean,
+  };
+}
+
+/**
+ * Create extended pipeline options from CLI args.
+ */
+function createExtendedPipelineOptions(args: CliArgs): ExtendedPipelineOptions {
+  return {
+    ...createPipelineOptions(args),
+    tag: args.flags.tag as string | undefined,
+  };
+}
+
+// =============================================================================
 // Commands
 // =============================================================================
 
@@ -213,31 +295,22 @@ const buildCommand: CliCommand = {
 
   async handler(args: CliArgs): Promise<number> {
     const configPath = args.flags.config as string;
-    const verbose = args.flags.verbose as boolean;
-    const clean = args.flags.clean as boolean;
     const buildAll = args.flags.all as boolean;
 
-    // Load and validate configuration
     const configResult = await loadAndValidateConfig(configPath);
     if (!configResult.success) {
       return 1;
     }
     const config = configResult.config;
 
-    const pipelineOptions: PipelineOptions = {
-      verbose,
-      clean,
-      scope: args.scope,
-    };
+    const pipelineOptions = createPipelineOptions(args);
 
     if (buildAll) {
-      // Build all distributions
       const results = await runPipelineAll(config, pipelineOptions);
       const failed = [...results.values()].filter((r) => !r.success);
       return failed.length > 0 ? 1 : 0;
     }
 
-    // Build specific distribution
     const distName = args.positional[0];
     if (!distName) {
       logger.error("Error: Distribution name required. Use --all to build all.");
@@ -253,6 +326,132 @@ const buildCommand: CliCommand = {
 
     const result = await runPipeline(distName, config, pipelineOptions);
     return result.success ? 0 : 1;
+  },
+};
+
+/**
+ * Setup command: Run setup phases (generate workflows, etc.).
+ */
+const setupCommand: CliCommand = {
+  name: "setup",
+  description: "Run setup phase (generate workflows, etc.)",
+  aliases: ["s", "init"],
+
+  async handler(args: CliArgs): Promise<number> {
+    const configPath = args.flags.config as string;
+
+    const configResult = await loadAndValidateConfig(configPath);
+    if (!configResult.success) {
+      return 1;
+    }
+    const config = configResult.config;
+
+    const targets = getTargetDistributions(args, config);
+    if (!targets) {
+      return 1;
+    }
+
+    logger.log(`Running setup for: ${targets.join(", ")}`);
+
+    const options = createExtendedPipelineOptions(args);
+    const results = await runSetup(config, options);
+
+    const failed = [...results.values()].filter((r) => !r.success);
+    if (failed.length > 0) {
+      logger.error(`Setup failed for ${failed.length} distribution(s)`);
+      return 1;
+    }
+
+    logger.log("\n[OK] Setup completed successfully");
+    return 0;
+  },
+};
+
+/**
+ * Release command: Run release phases (publish to registries).
+ */
+const releaseCommand: CliCommand = {
+  name: "release",
+  description: "Run release phase (publish to registries)",
+  aliases: ["r", "publish"],
+
+  async handler(args: CliArgs): Promise<number> {
+    const configPath = args.flags.config as string;
+
+    const configResult = await loadAndValidateConfig(configPath);
+    if (!configResult.success) {
+      return 1;
+    }
+    const config = configResult.config;
+
+    const targets = getTargetDistributions(args, config);
+    if (!targets) {
+      return 1;
+    }
+
+    logger.log(`Running release for: ${targets.join(", ")}`);
+
+    // Load release notes if specified
+    let releaseNotes: string | undefined;
+    const notesPath = args.flags.notes as string | undefined;
+    if (notesPath) {
+      try {
+        releaseNotes = await Deno.readTextFile(notesPath);
+      } catch (error) {
+        logger.error(`Failed to read release notes: ${String(error)}`);
+        return 1;
+      }
+    }
+
+    const options: ExtendedPipelineOptions = {
+      ...createExtendedPipelineOptions(args),
+      releaseNotes,
+      runRelease: true,
+    };
+
+    const results = await runRelease(config, options);
+
+    const failed = [...results.values()].filter((r) => !r.success);
+    if (failed.length > 0) {
+      logger.error(`Release failed for ${failed.length} distribution(s)`);
+      return 1;
+    }
+
+    logger.log("\n[OK] Release completed successfully");
+    return 0;
+  },
+};
+
+/**
+ * Graph command: Build using graph-based parallel execution.
+ */
+const graphCommand: CliCommand = {
+  name: "graph",
+  description: "Build using graph execution (parallel where possible)",
+  aliases: ["g", "parallel"],
+
+  async handler(args: CliArgs): Promise<number> {
+    const configPath = args.flags.config as string;
+
+    const configResult = await loadAndValidateConfig(configPath);
+    if (!configResult.success) {
+      return 1;
+    }
+    const config = configResult.config;
+
+    logger.log("Building with graph-based parallel execution...");
+
+    const options = createExtendedPipelineOptions(args);
+    const results = await runBuild(config, options);
+
+    const failed = [...results.values()].filter((r) => !r.success);
+    if (failed.length > 0) {
+      logger.error(`Build failed for ${failed.length} distribution(s)`);
+      return 1;
+    }
+
+    logger.log("\n[OK] Graph build completed successfully");
+    return 0;
   },
 };
 
@@ -282,96 +481,26 @@ const validateCommand: CliCommand = {
     if (validation.errors.length > 0) {
       logger.error("\nErrors:");
       for (const err of validation.errors) {
-        logger.error(`  \u2717 ${err}`);
+        logger.error(`  [X] ${err}`);
       }
     }
 
     if (validation.warnings.length > 0) {
       logger.warn("\nWarnings:");
       for (const warning of validation.warnings) {
-        logger.warn(`  \u26A0 ${warning}`);
+        logger.warn(`  [!] ${warning}`);
       }
     }
 
     if (validation.valid) {
-      logger.log("\n\u2713 Configuration is valid");
+      logger.log("\n[OK] Configuration is valid");
       logger.log(`  Distributions: ${Object.keys(config.distributions).join(", ") || "(none)"}`);
       logger.log(`  Output directory: ${config.distDir}`);
       return 0;
     }
 
-    logger.error("\n\u2717 Configuration is invalid");
+    logger.error("\n[X] Configuration is invalid");
     return 1;
-  },
-};
-
-/**
- * Update-workflows command: Generate GitHub Actions workflows.
- */
-const updateWorkflowsCommand: CliCommand = {
-  name: "update-workflows",
-  description: "Generate GitHub Actions workflows",
-  aliases: ["workflows", "uw"],
-
-  async handler(args: CliArgs): Promise<number> {
-    const configPath = args.flags.config as string;
-    const verbose = args.flags.verbose as boolean;
-
-    logger.log("Generating GitHub Actions workflows...");
-
-    let config;
-    try {
-      config = await loadDistConfig(configPath);
-    } catch (error) {
-      logger.error(`Failed to load config: ${String(error)}`);
-      return 1;
-    }
-
-    const workflowsDir = ".github/workflows";
-
-    // Ensure workflows directory exists
-    try {
-      await Deno.mkdir(workflowsDir, { recursive: true });
-    } catch {
-      // Directory may already exist
-    }
-
-    // Collect all workflow write operations
-    const writeOperations: Array<{ path: string; content: string }> = [];
-
-    for (const [distName, distConfig] of Object.entries(config.distributions)) {
-      const runtime = distConfig.runtime;
-
-      // Generate test workflow
-      const testWorkflow = generateTestWorkflow(distName, runtime, distConfig.versions);
-      writeOperations.push({
-        path: `${workflowsDir}/test-${distName}.yml`,
-        content: testWorkflow,
-      });
-
-      // Generate publish workflow if publish config exists
-      if (distConfig.publish) {
-        const publishWorkflow = generatePublishWorkflow(distName, runtime, distConfig.publish);
-        writeOperations.push({
-          path: `${workflowsDir}/publish-${distName}.yml`,
-          content: publishWorkflow,
-        });
-      }
-    }
-
-    // Write all workflows in parallel
-    await Promise.all(
-      writeOperations.map((op) => Deno.writeTextFile(op.path, op.content)),
-    );
-
-    if (verbose) {
-      for (const op of writeOperations) {
-        logger.log(`  Generated: ${op.path}`);
-      }
-    }
-
-    logger.log(`\n\u2713 Generated ${writeOperations.length} workflow(s)`);
-    return 0;
   },
 };
 
@@ -406,167 +535,15 @@ const versionCommand: CliCommand = {
 };
 
 // =============================================================================
-// Shared Command Helpers
-// =============================================================================
-
-/**
- * Result of config loading and validation.
- */
-interface ConfigLoadResult {
-  success: boolean;
-  config: Awaited<ReturnType<typeof loadDistConfig>>;
-}
-
-/**
- * Load and validate configuration, logging errors.
- */
-async function loadAndValidateConfig(configPath: string): Promise<ConfigLoadResult> {
-  let config;
-  try {
-    config = await loadDistConfig(configPath);
-  } catch (error) {
-    logger.error(`Failed to load config: ${String(error)}`);
-    return { success: false, config: { distDir: "target", distributions: {} } };
-  }
-
-  const validation = validateConfig(config);
-  if (!validation.valid) {
-    logger.error("Configuration errors:");
-    for (const err of validation.errors) {
-      logger.error(`  - ${err}`);
-    }
-    return { success: false, config };
-  }
-
-  for (const warning of validation.warnings) {
-    logger.warn(`Warning: ${warning}`);
-  }
-
-  return { success: true, config };
-}
-
-// =============================================================================
-// Workflow Generation
-// =============================================================================
-
-/**
- * Generate a test workflow for a distribution.
- */
-function generateTestWorkflow(
-  distName: string,
-  runtime: RuntimeId,
-  versions?: readonly string[],
-): string {
-  const runtimeVersions = versions ?? RUNTIME_DEFAULT_VERSIONS[runtime] ?? ["latest"];
-  const setupAction = RUNTIME_SETUP_ACTIONS[runtime] ?? RUNTIME_SETUP_ACTIONS.node;
-  const versionKey = RUNTIME_VERSION_KEYS[runtime] ?? RUNTIME_VERSION_KEYS.node;
-  const testCommand = RUNTIME_TEST_COMMANDS[runtime] ?? RUNTIME_TEST_COMMANDS.node;
-
-  const versionsJson = runtimeVersions.map((v) => `"${v}"`).join(", ");
-
-  return `# Auto-generated by deno-dist
-name: Test ${distName}
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        version: [${versionsJson}]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup ${runtime}
-        uses: ${setupAction}
-        with:
-          ${versionKey}: \${{ matrix.version }}
-
-      - name: Build distribution
-        run: deno task dist build ${distName}
-
-      - name: Run tests
-        run: ${testCommand}
-        working-directory: ./target/${distName}
-`;
-}
-
-/**
- * Generate a publish workflow for a distribution.
- */
-function generatePublishWorkflow(
-  distName: string,
-  runtime: RuntimeId,
-  publishConfig: { registry?: string; provenance?: boolean },
-): string {
-  const registry = publishConfig.registry ?? RUNTIME_DEFAULT_REGISTRIES[runtime] ?? "npm";
-  const provenance = publishConfig.provenance ?? true;
-  const publishCommand = getPublishCommand(runtime, registry, provenance);
-
-  return `# Auto-generated by deno-dist
-name: Publish ${distName}
-
-on:
-  release:
-    types: [published]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  id-token: write
-
-jobs:
-  publish:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Build distribution
-        run: deno task dist build ${distName}
-
-      - name: Publish to ${registry}
-        run: ${publishCommand}
-        working-directory: ./target/${distName}
-`;
-}
-
-/**
- * Get the publish command for a runtime and registry.
- */
-function getPublishCommand(runtime: RuntimeId, registry: string, provenance: boolean): string {
-  if (registry === "jsr") {
-    return "deno publish --allow-dirty";
-  }
-
-  if (runtime === "node" || runtime === "bun") {
-    const provenanceFlag = provenance ? " --provenance" : "";
-    return `npm publish --access public${provenanceFlag}`;
-  }
-
-  return "npm publish --access public";
-}
-
-// =============================================================================
 // Command Registry
 // =============================================================================
 
 const commands: readonly CliCommand[] = [
   buildCommand,
+  setupCommand,
+  releaseCommand,
+  graphCommand,
   validateCommand,
-  updateWorkflowsCommand,
   helpCommand,
   versionCommand,
 ];

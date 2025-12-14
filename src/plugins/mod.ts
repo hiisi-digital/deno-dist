@@ -5,16 +5,22 @@
  * Supports built-in plugins, external plugins, and custom scripts.
  */
 
+import { isPhaseId, PHASE_IDS } from "../generated_types.ts";
 import type {
   DistributionConfig,
   InlinePluginConfig,
+  PhaseId,
   Plugin,
   PluginContext,
   PluginMetadata,
   PluginPhaseResult,
   PluginReference,
+  ReleaseContext,
+  ReleaseResult,
+  SetupContext,
+  SetupResult,
 } from "../types.ts";
-import { PluginError } from "../types.ts";
+import { getPluginPhases, PluginError } from "../types.ts";
 
 // =============================================================================
 // Types
@@ -38,6 +44,18 @@ export interface ResolvedPlugin {
 export interface PluginRegistry {
   /** Registered plugins by ID */
   readonly plugins: Map<string, Plugin>;
+}
+
+/**
+ * Plugin validation result.
+ */
+export interface PluginValidationResult {
+  /** Whether the plugin is valid */
+  readonly valid: boolean;
+  /** Validation errors */
+  readonly errors: readonly string[];
+  /** Validation warnings */
+  readonly warnings: readonly string[];
 }
 
 // =============================================================================
@@ -125,7 +143,7 @@ function isValidPlugin(obj: unknown): obj is Plugin {
   }
 
   // If phase methods exist, they must be functions
-  for (const phase of ["preprocess", "transform", "postprocess"]) {
+  for (const phase of PHASE_IDS) {
     if (phase in plugin && typeof plugin[phase] !== "function") {
       return false;
     }
@@ -134,12 +152,126 @@ function isValidPlugin(obj: unknown): obj is Plugin {
   return true;
 }
 
+/**
+ * Perform detailed validation of a plugin.
+ */
+export function validatePlugin(plugin: Plugin): PluginValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // Validate metadata
+  const meta = plugin.metadata;
+
+  if (!meta.id || typeof meta.id !== "string") {
+    errors.push("Plugin metadata must have a non-empty 'id' string");
+  } else if (!/^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$|^@this$/.test(meta.id)) {
+    warnings.push(`Plugin ID '${meta.id}' does not follow kebab-case convention`);
+  }
+
+  if (!meta.name || typeof meta.name !== "string") {
+    errors.push("Plugin metadata must have a non-empty 'name' string");
+  }
+
+  if (!meta.version || typeof meta.version !== "string") {
+    errors.push("Plugin metadata must have a 'version' string");
+  }
+
+  if (!meta.description || typeof meta.description !== "string") {
+    warnings.push("Plugin should have a 'description' string");
+  }
+
+  if (!meta.targetRuntime) {
+    warnings.push("Plugin should specify a 'targetRuntime'");
+  }
+
+  // Validate phases
+  const implementedPhases = getPluginPhases(plugin);
+  if (implementedPhases.length === 0) {
+    warnings.push("Plugin does not implement any phases");
+  }
+
+  // Validate declared phases match implemented phases
+  if (meta.phases) {
+    for (const phase of meta.phases) {
+      if (!isPhaseId(phase)) {
+        errors.push(`Invalid phase '${phase}' in metadata.phases`);
+      } else if (!implementedPhases.includes(phase)) {
+        warnings.push(`Plugin declares phase '${phase}' but does not implement it`);
+      }
+    }
+  }
+
+  // Validate dependencies
+  if (meta.dependencies) {
+    if (!Array.isArray(meta.dependencies)) {
+      errors.push("Plugin metadata.dependencies must be an array");
+    } else {
+      for (const dep of meta.dependencies) {
+        if (typeof dep !== "string") {
+          errors.push("Plugin dependency must be a string");
+        }
+      }
+    }
+  }
+
+  // Validate conflicts
+  if (meta.conflicts) {
+    if (!Array.isArray(meta.conflicts)) {
+      errors.push("Plugin metadata.conflicts must be an array");
+    } else {
+      for (const conflict of meta.conflicts) {
+        if (typeof conflict !== "string") {
+          errors.push("Plugin conflict must be a string");
+        }
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+/**
+ * Check for conflicts between plugins.
+ */
+export function checkPluginConflicts(plugins: readonly Plugin[]): readonly string[] {
+  const conflicts: string[] = [];
+  const pluginIds = new Set(plugins.map((p) => p.metadata.id));
+
+  for (const plugin of plugins) {
+    const meta = plugin.metadata;
+    if (meta.conflicts) {
+      for (const conflictId of meta.conflicts) {
+        if (pluginIds.has(conflictId)) {
+          conflicts.push(
+            `Plugin '${meta.id}' conflicts with '${conflictId}' but both are enabled`,
+          );
+        }
+      }
+    }
+  }
+
+  return conflicts;
+}
+
 // =============================================================================
 // Built-in Plugin Loading
 // =============================================================================
 
 /** Built-in plugin IDs for fast lookup */
-const BUILTIN_PLUGIN_IDS = new Set(["deno-to-node", "deno-to-bun", "deno-passthrough"]);
+const BUILTIN_PLUGIN_IDS = new Set([
+  "deno-to-node",
+  "deno-to-bun",
+  "deno-passthrough",
+  // Lifecycle plugins
+  "github-actions",
+  "github-release",
+  "jsr-publish",
+  "npm-publish",
+]);
 
 /** Cached built-in plugin imports - lazy loaded */
 const builtinPluginCache = new Map<string, Plugin>();
@@ -147,7 +279,7 @@ const builtinPluginCache = new Map<string, Plugin>();
 /**
  * Check if a plugin ID is a built-in plugin.
  */
-function isBuiltinPlugin(id: string): boolean {
+export function isBuiltinPlugin(id: string): boolean {
   return BUILTIN_PLUGIN_IDS.has(id);
 }
 
@@ -174,6 +306,16 @@ async function loadBuiltinPlugin(id: string): Promise<Plugin | undefined> {
     case "deno-passthrough":
       plugin = (await import("./deno_passthrough.ts")).default;
       break;
+    case "github-actions":
+      plugin = (await import("./github_actions.ts")).default;
+      break;
+    // Lifecycle plugins to be implemented
+    case "github-release":
+    case "jsr-publish":
+    case "npm-publish":
+      // These plugins don't exist yet - return undefined
+      // They'll be created later
+      return undefined;
   }
 
   // Cache the loaded plugin
@@ -234,6 +376,11 @@ async function doLoadPlugin(id: string): Promise<Plugin> {
     if (builtin) {
       return builtin;
     }
+    // If built-in plugin not found (not implemented yet), fall through
+    throw new PluginError(
+      `Built-in plugin "${id}" is not yet implemented`,
+      id,
+    );
   }
 
   // Try to load as external module
@@ -279,7 +426,11 @@ export async function resolvePlugins(
   references: readonly PluginReference[] | undefined,
   distConfig: DistributionConfig,
 ): Promise<readonly ResolvedPlugin[]> {
-  const hasCustomScripts = distConfig.preprocess || distConfig.transform || distConfig.postprocess;
+  const hasCustomScripts = distConfig.preprocess ||
+    distConfig.transform ||
+    distConfig.postprocess ||
+    distConfig.setup ||
+    distConfig.release;
 
   if (!references || references.length === 0) {
     // If no plugins specified but custom scripts exist, run them
@@ -292,8 +443,11 @@ export async function resolvePlugins(
   // Normalize all references first
   const normalized = references.map(normalizeReference);
 
+  // Filter out disabled plugins
+  const enabled = normalized.filter((c) => c.enabled !== false);
+
   // Identify plugins that need loading (not @this)
-  const pluginsToLoad = normalized
+  const pluginsToLoad = enabled
     .filter((c) => c.id !== "@this")
     .map((c) => c.id);
 
@@ -311,8 +465,17 @@ export async function resolvePlugins(
     pluginMap.set(id, loadedPlugins[i]);
   });
 
+  // Check for conflicts
+  const conflicts = checkPluginConflicts(loadedPlugins);
+  if (conflicts.length > 0) {
+    throw new PluginError(
+      `Plugin conflicts detected:\n${conflicts.join("\n")}`,
+      "plugin-resolution",
+    );
+  }
+
   // Build resolved array maintaining order
-  return normalized.map((config) => {
+  return enabled.map((config) => {
     if (config.id === "@this") {
       return createThisPlugin(distConfig);
     }
@@ -328,7 +491,10 @@ export async function resolvePlugins(
  * Normalize a plugin reference to an InlinePluginConfig.
  */
 function normalizeReference(ref: PluginReference): InlinePluginConfig {
-  return typeof ref === "string" ? { id: ref } : ref;
+  if (typeof ref === "string") {
+    return { id: ref };
+  }
+  return ref;
 }
 
 /**
@@ -346,12 +512,22 @@ function createThisPlugin(distConfig: DistributionConfig): ResolvedPlugin {
  * Create a plugin wrapper for custom scripts.
  */
 function createCustomScriptPlugin(distConfig: DistributionConfig): Plugin {
+  // Determine which phases are implemented
+  const phases: readonly PhaseId[] = [
+    ...(distConfig.preprocess ? ["preprocess" as const] : []),
+    ...(distConfig.transform ? ["transform" as const] : []),
+    ...(distConfig.postprocess ? ["postprocess" as const] : []),
+    ...(distConfig.setup ? ["setup" as const] : []),
+    ...(distConfig.release ? ["release" as const] : []),
+  ];
+
   const metadata: PluginMetadata = {
     id: "@this",
     name: "Custom Scripts",
     version: "0.0.0",
-    description: "User-defined preprocess/transform/postprocess scripts",
+    description: "User-defined preprocess/transform/postprocess/setup/release scripts",
     targetRuntime: distConfig.runtime,
+    phases,
   };
 
   return {
@@ -374,11 +550,23 @@ function createCustomScriptPlugin(distConfig: DistributionConfig): Plugin {
       }
       return runCustomScript(distConfig.postprocess, "postprocess", context);
     },
+    setup(context: SetupContext): Promise<SetupResult> {
+      if (!distConfig.setup) {
+        return Promise.resolve({ success: true });
+      }
+      return runCustomSetupScript(distConfig.setup, context);
+    },
+    release(context: ReleaseContext): Promise<ReleaseResult> {
+      if (!distConfig.release) {
+        return Promise.resolve({ success: true });
+      }
+      return runCustomReleaseScript(distConfig.release, context);
+    },
   };
 }
 
 /**
- * Run a custom script for a specific phase.
+ * Run a custom script for a build phase.
  */
 async function runCustomScript(
   scriptPath: string,
@@ -412,6 +600,82 @@ async function runCustomScript(
     return {
       success: false,
       error: `Failed to run custom script "${scriptPath}": ${String(error)}`,
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Run a custom setup script.
+ */
+async function runCustomSetupScript(
+  scriptPath: string,
+  context: SetupContext,
+): Promise<SetupResult> {
+  const startTime = Date.now();
+
+  try {
+    const module = await import(scriptPath);
+    const handler = module.setup ?? module.default?.setup;
+
+    if (typeof handler !== "function") {
+      return {
+        success: false,
+        error: `Script "${scriptPath}" does not export a "setup" function`,
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    const result = await handler(context);
+    const durationMs = Date.now() - startTime;
+
+    if (typeof result === "object" && result !== null) {
+      return { ...result, durationMs };
+    }
+
+    return { success: true, durationMs };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to run custom setup script "${scriptPath}": ${String(error)}`,
+      durationMs: Date.now() - startTime,
+    };
+  }
+}
+
+/**
+ * Run a custom release script.
+ */
+async function runCustomReleaseScript(
+  scriptPath: string,
+  context: ReleaseContext,
+): Promise<ReleaseResult> {
+  const startTime = Date.now();
+
+  try {
+    const module = await import(scriptPath);
+    const handler = module.release ?? module.default?.release;
+
+    if (typeof handler !== "function") {
+      return {
+        success: false,
+        error: `Script "${scriptPath}" does not export a "release" function`,
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    const result = await handler(context);
+    const durationMs = Date.now() - startTime;
+
+    if (typeof result === "object" && result !== null) {
+      return { ...result, durationMs };
+    }
+
+    return { success: true, durationMs };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to run custom release script "${scriptPath}": ${String(error)}`,
       durationMs: Date.now() - startTime,
     };
   }

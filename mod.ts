@@ -8,10 +8,11 @@
  * @example
  * ```ts
  * // Use via CLI
- * // deno task dist build node
- * // deno task dist build --all
- * // deno task dist validate
- * // deno task dist update-workflows
+ * // deno-dist build node
+ * // deno-dist build --all
+ * // deno-dist setup --all
+ * // deno-dist release node
+ * // deno-dist validate
  * ```
  *
  * @example
@@ -41,15 +42,54 @@
  */
 
 // =============================================================================
+// Generated Types (from JSON schemas)
+// =============================================================================
+
+export type {
+  BuildPhaseId,
+  CiConfig,
+  DistConfigSchema,
+  DistributionConfigSchema,
+  InlinePluginConfig,
+  LifecyclePhaseId,
+  PhaseId,
+  PluginMetadataSchema,
+  PluginReference,
+  PublishConfig,
+  RegistryConfig,
+  ReleaseNotesConfig,
+  RuntimeId,
+  TargetRuntime,
+  TestConfig,
+} from "./src/generated_types.ts";
+
+export {
+  BUILD_PHASE_IDS,
+  isBuildPhase,
+  isLifecyclePhase,
+  isPhaseId,
+  isRuntimeId,
+  LIFECYCLE_PHASE_IDS,
+  PHASE_IDS,
+  RUNTIME_IDS,
+} from "./src/generated_types.ts";
+
+// =============================================================================
 // Core Types
 // =============================================================================
 
 export type {
+  BasePluginContext,
   CliArgs,
   CliCommand,
   DistConfig,
+  DistMetadata,
   DistributionConfig,
-  InlinePluginConfig,
+  ExecutionGraph,
+  ExecutionOperation,
+  ExecutionWave,
+  FileOperation,
+  GraphExecutionResult,
   LogFunctions,
   PipelineOptions,
   PipelinePhase,
@@ -59,16 +99,18 @@ export type {
   PluginContext,
   PluginMetadata,
   PluginPhaseResult,
-  PluginReference,
   PostprocessPlugin,
   PreprocessPlugin,
-  PublishConfig,
-  RuntimeId,
+  ReleaseContext,
+  ReleasePlugin,
+  ReleaseResult,
   RuntimeVersion,
+  SetupContext,
+  SetupPlugin,
+  SetupResult,
   TemplateInsertionMode,
   TemplateMarker,
   TemplateVariables,
-  TestConfig,
   TransformPlugin,
   WorkflowConfig,
   WorkflowJob,
@@ -76,7 +118,16 @@ export type {
   WorkflowTriggers,
 } from "./src/types.ts";
 
-export { ConfigError, DistError, PipelineError, PluginError, TemplateError } from "./src/types.ts";
+export {
+  ConfigError,
+  DistError,
+  getPluginPhases,
+  GraphError,
+  PipelineError,
+  PluginError,
+  pluginImplementsPhase,
+  TemplateError,
+} from "./src/types.ts";
 
 // =============================================================================
 // Configuration
@@ -104,13 +155,47 @@ export type { ParsedVariable, VariableType } from "./src/template.ts";
 // Pipeline
 // =============================================================================
 
-export { clearConfigCache, runPipeline, runPipelineAll } from "./src/pipeline.ts";
+export {
+  clearConfigCache,
+  runBuild,
+  runPipeline,
+  runPipelineAll,
+  runPipelineGraph,
+  runRelease,
+  runSetup,
+} from "./src/pipeline.ts";
+
+export type { ExtendedPipelineOptions } from "./src/pipeline.ts";
+
+// =============================================================================
+// Graph Execution
+// =============================================================================
+
+export {
+  buildExecutionGraph,
+  executeGraph,
+  filterGraphByPhases,
+  getDistributionOperations,
+  getPhaseOperations,
+  mergeGraphs,
+  visualizeGraph,
+} from "./src/graph.ts";
+
+export type { ContextFactory, GraphBuildOptions, ResolvedPluginInfo } from "./src/graph.ts";
 
 // =============================================================================
 // Plugins
 // =============================================================================
 
-export { loadPlugin, resolvePlugins } from "./src/plugins/mod.ts";
+export {
+  checkPluginConflicts,
+  isBuiltinPlugin,
+  loadPlugin,
+  resolvePlugins,
+  validatePlugin,
+} from "./src/plugins/mod.ts";
+
+export type { PluginValidationResult, ResolvedPlugin } from "./src/plugins/mod.ts";
 
 // =============================================================================
 // Plugin Utilities (for plugin authors)
