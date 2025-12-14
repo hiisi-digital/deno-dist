@@ -401,9 +401,8 @@ export function createPipelineContext(
     variables: {
       env: Deno.env.toObject(),
       config: {},
-      scope: options.scope ?? {},
       captures: {},
-      custom: {},
+      custom: options.scope ?? {},
     },
   };
 }

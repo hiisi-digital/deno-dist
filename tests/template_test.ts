@@ -43,13 +43,6 @@ describe("parseVariable", () => {
     assertEquals(result.isCapture, false);
   });
 
-  it("should parse scope variables", () => {
-    const result = parseVariable("scope.myKey");
-    assertEquals(result.type, "scope");
-    assertEquals(result.key, "myKey");
-    assertEquals(result.isCapture, false);
-  });
-
   it("should parse custom variables", () => {
     const result = parseVariable("customVar");
     assertEquals(result.type, "custom");
@@ -97,7 +90,6 @@ describe("createVariables", () => {
     const vars = createVariables();
     assertEquals(Object.keys(vars.env).length, 0);
     assertEquals(Object.keys(vars.config).length, 0);
-    assertEquals(Object.keys(vars.scope).length, 0);
     assertEquals(Object.keys(vars.captures).length, 0);
     assertEquals(Object.keys(vars.custom).length, 0);
   });
@@ -106,11 +98,11 @@ describe("createVariables", () => {
     const vars = createVariables({
       env: { HOME: "/home/user" },
       config: { version: "1.0.0" },
-      scope: { key: "value" },
+      custom: { key: "value" },
     });
     assertEquals(vars.env["HOME"], "/home/user");
     assertEquals(vars.config["version"], "1.0.0");
-    assertEquals(vars.scope["key"], "value");
+    assertEquals(vars.custom["key"], "value");
   });
 });
 
@@ -118,9 +110,8 @@ describe("resolveVariable", () => {
   const variables: TemplateVariables = {
     env: { HOME: "/home/user", PATH: "/usr/bin" },
     config: { name: "test-pkg", version: "1.0.0", nested: { value: "deep" } },
-    scope: { buildType: "release" },
     captures: { pkg: "lodash" },
-    custom: { myVar: "hello" },
+    custom: { myVar: "hello", buildType: "release" },
   };
 
   it("should resolve env variables", () => {
@@ -133,12 +124,6 @@ describe("resolveVariable", () => {
     const parsed = parseVariable("config.version");
     const result = resolveVariable(parsed, variables);
     assertEquals(result, "1.0.0");
-  });
-
-  it("should resolve scope variables", () => {
-    const parsed = parseVariable("scope.buildType");
-    const result = resolveVariable(parsed, variables);
-    assertEquals(result, "release");
   });
 
   it("should resolve capture variables", () => {
@@ -164,7 +149,6 @@ describe("resolveVariables", () => {
   const variables: TemplateVariables = {
     env: { USER: "testuser" },
     config: { version: "2.0.0" },
-    scope: {},
     captures: {},
     custom: {},
   };

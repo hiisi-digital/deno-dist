@@ -24,7 +24,7 @@ import { TemplateError } from "./types.ts";
 /**
  * Type of template variable.
  */
-export type VariableType = "capture" | "env" | "config" | "scope" | "custom";
+export type VariableType = "capture" | "env" | "config" | "custom";
 
 /**
  * Parsed template variable.
@@ -76,7 +76,6 @@ export function createVariables(options?: {
   return {
     env: options?.env ?? {},
     config: options?.config ?? {},
-    scope: options?.scope ?? {},
     captures: options?.captures ?? {},
     custom: options?.custom ?? {},
   };
@@ -85,8 +84,10 @@ export function createVariables(options?: {
 /**
  * Create TemplateVariables from environment, config, and CLI scope.
  *
+ * CLI scope values become custom variables.
+ *
  * @param config Configuration object (from deno.json)
- * @param scope CLI-provided scope values
+ * @param scope CLI-provided scope values (become custom variables)
  * @returns TemplateVariables instance
  */
 export function createVariablesFromContext(
@@ -98,12 +99,17 @@ export function createVariablesFromContext(
     env[key] = value;
   }
 
+  // Merge static scope from metadata.dist.scope with CLI-provided scope
+  const staticScope = getNestedValue(config, "metadata.dist.scope") as
+    | Record<string, string>
+    | undefined;
+  const custom = { ...staticScope, ...scope };
+
   return {
     env,
     config,
-    scope,
     captures: {},
-    custom: {},
+    custom,
   };
 }
 
@@ -146,16 +152,6 @@ export function parseVariable(variableText: string): ParsedVariable {
       raw,
       type: "config",
       key: variableText.slice(7),
-      isCapture: false,
-    };
-  }
-
-  // Scope variable: scope.key
-  if (variableText.startsWith("scope.")) {
-    return {
-      raw,
-      type: "scope",
-      key: variableText.slice(6),
       isCapture: false,
     };
   }
@@ -213,9 +209,6 @@ export function resolveVariable(
       const value = getNestedValue(variables.config, variable.key);
       return value !== undefined ? String(value) : undefined;
     }
-
-    case "scope":
-      return variables.scope[variable.key];
 
     case "custom":
       return variables.custom[variable.key];

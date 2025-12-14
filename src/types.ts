@@ -254,17 +254,21 @@ export interface PublishConfig {
 
 /**
  * Template variables available during processing.
+ *
+ * Variables are resolved in this order:
+ * 1. Capture variables (@{=name}) - from pattern matching
+ * 2. Environment variables (@{env.VAR}) - from Deno.env
+ * 3. Config variables (@{config.field}) - from deno.json
+ * 4. Custom variables (@{varName}) - from CLI --scope or metadata.dist.scope
  */
 export interface TemplateVariables {
   /** Environment variables (@{env.VAR_NAME}) */
   readonly env: Record<string, string>;
   /** Config values (@{config.field}) */
   readonly config: Record<string, unknown>;
-  /** CLI-provided scope values (@{scope.key}) */
-  readonly scope: Record<string, string>;
-  /** Capture variables (@{=varName}) */
+  /** Capture variables (@{=varName}) - from pattern matching */
   readonly captures: Record<string, string>;
-  /** Custom variables (@{customVar}) */
+  /** Custom variables (@{varName}) - from CLI --scope or metadata.dist.scope */
   readonly custom: Record<string, string>;
 }
 
