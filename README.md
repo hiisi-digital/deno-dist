@@ -39,7 +39,7 @@ deno run -A jsr:@hiisi/deno-dist/cli build node
 }
 
 # Then run as
-deno dist build node
+deno task dist build node
 ```
 
 ## Quick Start
@@ -282,7 +282,7 @@ if (result.success) {
 ## CLI Reference
 
 ```
-deno-dist v0.1.0
+deno-dist v0.2.0
 
 USAGE:
   deno-dist <command> [options]
