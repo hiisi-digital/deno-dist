@@ -298,17 +298,35 @@ export function extractCaptures(
   const captures: Record<string, string> = {};
   const captureNames: string[] = [];
 
-  // Convert pattern to regex, collecting capture names
-  let regexPattern = escapeRegex(pattern);
+  // First, find all capture variable positions and names
+  const capturePattern = /@\{=([^}]+)\}/g;
+  const parts: Array<{ type: "literal" | "capture"; value: string }> = [];
+  let lastIndex = 0;
+  let captureMatch: RegExpExecArray | null;
 
-  // Replace capture variables with capture groups
-  regexPattern = regexPattern.replace(
-    /@\{=([^}]+)\}/g,
-    (_match, name: string) => {
-      captureNames.push(name);
-      return "(.+?)";
-    },
-  );
+  while ((captureMatch = capturePattern.exec(pattern)) !== null) {
+    // Add literal part before this capture
+    if (captureMatch.index > lastIndex) {
+      parts.push({
+        type: "literal",
+        value: pattern.slice(lastIndex, captureMatch.index),
+      });
+    }
+    // Add the capture
+    parts.push({ type: "capture", value: captureMatch[1] });
+    captureNames.push(captureMatch[1]);
+    lastIndex = captureMatch.index + captureMatch[0].length;
+  }
+
+  // Add remaining literal part
+  if (lastIndex < pattern.length) {
+    parts.push({ type: "literal", value: pattern.slice(lastIndex) });
+  }
+
+  // Build regex pattern by escaping literals and inserting capture groups
+  const regexPattern = parts
+    .map((part) => (part.type === "literal" ? escapeRegex(part.value) : "(.+?)"))
+    .join("");
 
   const regex = new RegExp(`^${regexPattern}$`);
   const match = source.match(regex);
