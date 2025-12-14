@@ -104,7 +104,7 @@ export type { ParsedVariable, VariableType } from "./src/template.ts";
 // Pipeline
 // =============================================================================
 
-export { runPipeline, runPipelineAll } from "./src/pipeline.ts";
+export { clearConfigCache, runPipeline, runPipelineAll } from "./src/pipeline.ts";
 
 // =============================================================================
 // Plugins

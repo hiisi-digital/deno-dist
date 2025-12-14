@@ -6,6 +6,15 @@
  */
 
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
+import {
+  collectFiles,
+  type CollectFilesOptions,
+  type CopyResult,
+  ensureDirectory,
+  getDirectory,
+  getRelativePath,
+  tryCopyFile,
+} from "./utils.ts";
 
 // =============================================================================
 // Plugin Metadata
@@ -49,6 +58,17 @@ export interface DenoPassthroughOptions {
     readonly pattern: string;
     readonly replacement: string;
   }[];
+}
+
+// =============================================================================
+// Comment Stripping State Machine
+// =============================================================================
+
+const enum CommentState {
+  Normal = 0,
+  InString = 1,
+  InSingleLineComment = 2,
+  InMultiLineComment = 3,
 }
 
 // =============================================================================
@@ -108,93 +128,45 @@ const denoPassthroughPlugin: Plugin = {
     const stripTests = options?.stripTests ?? true;
     const copyAssets = options?.copyAssets ?? true;
     const transforms = options?.transforms ?? [];
+    const stripComments = options?.stripComments ?? false;
 
     // Create output directory
-    await Deno.mkdir(context.outputDir, { recursive: true });
+    await ensureDirectory(context.outputDir);
 
     // Collect files to copy
-    const files = await collectFiles(context.sourceDir, {
+    const collectOptions: CollectFilesOptions = {
       include: options?.include,
       exclude: options?.exclude,
-      stripTests,
-      copyAssets,
-    });
-
-    // Process all files in parallel
-    const processFile = async (file: string): Promise<string> => {
-      const relativePath = file.slice(context.sourceDir.length + 1);
-      const outputPath = `${context.outputDir}/${relativePath}`;
-
-      // Ensure directory exists
-      const outputDirPath = outputPath.substring(0, outputPath.lastIndexOf("/"));
-      if (outputDirPath) {
-        await Deno.mkdir(outputDirPath, { recursive: true });
-      }
-
-      // Check if this is a TypeScript file that needs transformation
-      if (file.endsWith(".ts") || file.endsWith(".tsx")) {
-        let content = await Deno.readTextFile(file);
-
-        // Strip comments if requested
-        if (options?.stripComments) {
-          content = stripTypeScriptComments(content);
-        }
-
-        // Apply custom transforms
-        for (const transform of transforms) {
-          const regex = new RegExp(transform.pattern, "g");
-          content = content.replace(regex, transform.replacement);
-        }
-
-        await Deno.writeTextFile(outputPath, content);
-      } else {
-        // Copy non-TypeScript files directly
-        await Deno.copyFile(file, outputPath);
-      }
-
-      context.log.debug(`Copied: ${relativePath}`);
-      return outputPath;
+      includeTests: !stripTests,
+      includeAssets: copyAssets,
     };
 
-    const processedFiles = await Promise.all(files.map(processFile));
+    const files = await collectFiles(context.sourceDir, collectOptions);
+
+    // Process all files in parallel
+    const processedFiles = await Promise.all(
+      files.map((file) =>
+        processFile(file, context, {
+          stripComments,
+          transforms,
+        })
+      ),
+    );
     affectedFiles.push(...processedFiles);
 
     // Copy deno.json if requested
     if (options?.copyDenoJson !== false) {
-      try {
-        const srcPath = `${context.sourceDir}/deno.json`;
-        const destPath = `${context.outputDir}/deno.json`;
-        await Deno.copyFile(srcPath, destPath);
-        affectedFiles.push(destPath);
-        context.log.debug("Copied deno.json");
-      } catch {
-        // Try deno.jsonc
-        try {
-          const srcPath = `${context.sourceDir}/deno.jsonc`;
-          const destPath = `${context.outputDir}/deno.jsonc`;
-          await Deno.copyFile(srcPath, destPath);
-          affectedFiles.push(destPath);
-          context.log.debug("Copied deno.jsonc");
-        } catch {
-          // No deno.json(c) found
-        }
+      const denoJsonPath = await copyDenoConfig(context);
+      if (denoJsonPath) {
+        affectedFiles.push(denoJsonPath);
+        context.log.debug("Copied deno config");
       }
     }
 
     // Copy additional files if specified
     const filesToCopy = options?.copyFiles ?? ["LICENSE", "README.md"];
-    const copyPromises = filesToCopy.map(async (file) => {
-      const srcPath = `${context.sourceDir}/${file}`;
-      const destPath = `${context.outputDir}/${file}`;
-      try {
-        await Deno.copyFile(srcPath, destPath);
-        return { file, destPath, success: true as const };
-      } catch {
-        return { file, success: false as const };
-      }
-    });
+    const copyResults = await copyAdditionalFiles(context, filesToCopy);
 
-    const copyResults = await Promise.all(copyPromises);
     for (const result of copyResults) {
       if (result.success) {
         affectedFiles.push(result.destPath);
@@ -220,19 +192,19 @@ const denoPassthroughPlugin: Plugin = {
     context.log.info("Validating Deno output...");
 
     // Try to run deno check on the output
+    const modPath = `${context.outputDir}/mod.ts`;
     try {
-      const modPath = `${context.outputDir}/mod.ts`;
-      try {
-        await Deno.stat(modPath);
-      } catch {
-        // No mod.ts, skip validation
-        context.log.info("No mod.ts found, skipping type check");
-        return {
-          success: true,
-          durationMs: Date.now() - startTime,
-        };
-      }
+      await Deno.stat(modPath);
+    } catch {
+      // No mod.ts, skip validation
+      context.log.info("No mod.ts found, skipping type check");
+      return {
+        success: true,
+        durationMs: Date.now() - startTime,
+      };
+    }
 
+    try {
       const command = new Deno.Command("deno", {
         args: ["check", "mod.ts"],
         cwd: context.outputDir,
@@ -269,149 +241,157 @@ const denoPassthroughPlugin: Plugin = {
 // =============================================================================
 
 /**
- * Collect files from a directory with filtering.
+ * Process a single file - copy or transform.
  */
-async function collectFiles(
-  dir: string,
+async function processFile(
+  file: string,
+  context: PluginContext,
   options: {
-    include?: readonly string[];
-    exclude?: readonly string[];
-    stripTests: boolean;
-    copyAssets: boolean;
+    stripComments: boolean;
+    transforms: readonly { pattern: string; replacement: string }[];
   },
-): Promise<string[]> {
-  const files: string[] = [];
-  const excludeDirs = ["node_modules", ".git", "target", "dist", "coverage", "npm"];
+): Promise<string> {
+  const relativePath = getRelativePath(file, context.sourceDir);
+  const outputPath = `${context.outputDir}/${relativePath}`;
 
-  for await (const entry of Deno.readDir(dir)) {
-    const path = `${dir}/${entry.name}`;
-
-    if (entry.isDirectory) {
-      // Skip excluded directories
-      if (excludeDirs.includes(entry.name)) {
-        continue;
-      }
-      // Check custom exclude patterns
-      if (options.exclude?.some((pattern) => matchGlob(entry.name, pattern))) {
-        continue;
-      }
-      const subFiles = await collectFiles(path, options);
-      files.push(...subFiles);
-    } else if (entry.isFile) {
-      // Skip test files if requested
-      if (
-        options.stripTests &&
-        (entry.name.includes(".test.") ||
-          entry.name.includes("_test.") ||
-          entry.name.endsWith("_test.ts"))
-      ) {
-        continue;
-      }
-
-      // Check if file matches include patterns
-      if (options.include && options.include.length > 0) {
-        if (!options.include.some((pattern) => matchGlob(entry.name, pattern))) {
-          continue;
-        }
-      }
-
-      // Check custom exclude patterns
-      if (options.exclude?.some((pattern) => matchGlob(entry.name, pattern))) {
-        continue;
-      }
-
-      // Only copy TypeScript files unless copyAssets is true
-      const isTypeScript = entry.name.endsWith(".ts") || entry.name.endsWith(".tsx");
-      if (isTypeScript || options.copyAssets) {
-        files.push(path);
-      }
-    }
+  // Ensure directory exists
+  const outputDirPath = getDirectory(outputPath);
+  if (outputDirPath) {
+    await ensureDirectory(outputDirPath);
   }
 
-  return files;
+  // Check if this is a TypeScript file that needs transformation
+  if (file.endsWith(".ts") || file.endsWith(".tsx")) {
+    let content = await Deno.readTextFile(file);
+
+    // Strip comments if requested
+    if (options.stripComments) {
+      content = stripTypeScriptComments(content);
+    }
+
+    // Apply custom transforms
+    for (const transform of options.transforms) {
+      const regex = new RegExp(transform.pattern, "g");
+      content = content.replace(regex, transform.replacement);
+    }
+
+    await Deno.writeTextFile(outputPath, content);
+  } else {
+    // Copy non-TypeScript files directly
+    await Deno.copyFile(file, outputPath);
+  }
+
+  context.log.debug(`Copied: ${relativePath}`);
+  return outputPath;
 }
 
 /**
- * Simple glob pattern matching.
+ * Copy deno.json or deno.jsonc if it exists.
  */
-function matchGlob(name: string, pattern: string): boolean {
-  // Convert glob to regex
-  const regex = pattern
-    .replace(/\./g, "\\.")
-    .replace(/\*/g, ".*")
-    .replace(/\?/g, ".");
-  return new RegExp(`^${regex}$`).test(name);
+async function copyDenoConfig(context: PluginContext): Promise<string | null> {
+  // Try deno.json first
+  try {
+    const srcPath = `${context.sourceDir}/deno.json`;
+    const destPath = `${context.outputDir}/deno.json`;
+    await Deno.copyFile(srcPath, destPath);
+    return destPath;
+  } catch {
+    // Try deno.jsonc
+    try {
+      const srcPath = `${context.sourceDir}/deno.jsonc`;
+      const destPath = `${context.outputDir}/deno.jsonc`;
+      await Deno.copyFile(srcPath, destPath);
+      return destPath;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Copy additional files to the output directory.
+ */
+function copyAdditionalFiles(
+  context: PluginContext,
+  files: readonly string[],
+): Promise<CopyResult[]> {
+  return Promise.all(
+    files.map((file) =>
+      tryCopyFile(
+        `${context.sourceDir}/${file}`,
+        `${context.outputDir}/${file}`,
+        file,
+      )
+    ),
+  );
 }
 
 /**
  * Strip comments from TypeScript code.
- * Note: This is a simple implementation and may not handle all edge cases.
+ * Uses a state machine to handle strings and comments correctly.
  */
 function stripTypeScriptComments(content: string): string {
-  let result = "";
-  let inString = false;
+  const result: string[] = [];
+  let state: CommentState = CommentState.Normal;
   let stringChar = "";
-  let inSingleLineComment = false;
-  let inMultiLineComment = false;
   let i = 0;
 
   while (i < content.length) {
     const char = content[i];
-    const nextChar = content[i + 1];
+    const nextChar = content[i + 1] ?? "";
+    const prevChar = i > 0 ? content[i - 1] : "";
 
-    // Handle string literals
-    if (!inSingleLineComment && !inMultiLineComment) {
-      if ((char === '"' || char === "'" || char === "`") && content[i - 1] !== "\\") {
-        if (!inString) {
-          inString = true;
+    switch (state) {
+      case CommentState.Normal:
+        // Check for string start
+        if ((char === '"' || char === "'" || char === "`") && prevChar !== "\\") {
+          state = CommentState.InString;
           stringChar = char;
-        } else if (char === stringChar) {
-          inString = false;
+          result.push(char);
+        } // Check for single-line comment
+        else if (char === "/" && nextChar === "/") {
+          state = CommentState.InSingleLineComment;
+          i++; // Skip the second /
+        } // Check for multi-line comment
+        else if (char === "/" && nextChar === "*") {
+          state = CommentState.InMultiLineComment;
+          i++; // Skip the *
+        } else {
+          result.push(char);
         }
-      }
-    }
+        break;
 
-    // Handle comments
-    if (!inString) {
-      // Check for single-line comment
-      if (char === "/" && nextChar === "/" && !inMultiLineComment) {
-        inSingleLineComment = true;
-        i += 2;
-        continue;
-      }
+      case CommentState.InString:
+        result.push(char);
+        // Check for string end (not escaped)
+        if (char === stringChar && prevChar !== "\\") {
+          state = CommentState.Normal;
+        }
+        break;
 
-      // Check for multi-line comment
-      if (char === "/" && nextChar === "*" && !inSingleLineComment) {
-        inMultiLineComment = true;
-        i += 2;
-        continue;
-      }
+      case CommentState.InSingleLineComment:
+        // End at newline
+        if (char === "\n") {
+          state = CommentState.Normal;
+          result.push(char);
+        }
+        // Skip all other characters in comment
+        break;
 
-      // End of single-line comment
-      if (inSingleLineComment && char === "\n") {
-        inSingleLineComment = false;
-        result += char;
-        i++;
-        continue;
-      }
-
-      // End of multi-line comment
-      if (inMultiLineComment && char === "*" && nextChar === "/") {
-        inMultiLineComment = false;
-        i += 2;
-        continue;
-      }
-    }
-
-    // Add character to result if not in a comment
-    if (!inSingleLineComment && !inMultiLineComment) {
-      result += char;
+      case CommentState.InMultiLineComment:
+        // End at */
+        if (char === "*" && nextChar === "/") {
+          state = CommentState.Normal;
+          i++; // Skip the /
+        }
+        // Skip all other characters in comment
+        break;
     }
 
     i++;
   }
 
-  return result;
+  return result.join("");
 }
 
 // =============================================================================

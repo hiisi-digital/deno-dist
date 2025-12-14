@@ -427,12 +427,13 @@ export interface CliArgs {
  * Base error class for deno-dist errors.
  */
 export class DistError extends Error {
+  override readonly name: string = "DistError";
+
   constructor(
     message: string,
     public readonly code: string,
   ) {
     super(message);
-    this.name = "DistError";
   }
 }
 
@@ -440,9 +441,10 @@ export class DistError extends Error {
  * Configuration validation error.
  */
 export class ConfigError extends DistError {
+  override readonly name: string = "ConfigError";
+
   constructor(message: string) {
     super(message, "CONFIG_ERROR");
-    this.name = "ConfigError";
   }
 }
 
@@ -450,12 +452,13 @@ export class ConfigError extends DistError {
  * Plugin-related error.
  */
 export class PluginError extends DistError {
+  override readonly name: string = "PluginError";
+
   constructor(
     message: string,
     public readonly pluginId: string,
   ) {
     super(message, "PLUGIN_ERROR");
-    this.name = "PluginError";
   }
 }
 
@@ -463,9 +466,10 @@ export class PluginError extends DistError {
  * Template processing error.
  */
 export class TemplateError extends DistError {
+  override readonly name: string = "TemplateError";
+
   constructor(message: string) {
     super(message, "TEMPLATE_ERROR");
-    this.name = "TemplateError";
   }
 }
 
@@ -473,11 +477,12 @@ export class TemplateError extends DistError {
  * Pipeline execution error.
  */
 export class PipelineError extends DistError {
+  override readonly name: string = "PipelineError";
+
   constructor(
     message: string,
     public readonly phase: PipelinePhase,
   ) {
     super(message, "PIPELINE_ERROR");
-    this.name = "PipelineError";
   }
 }

@@ -12,7 +12,6 @@ import { resolvePlugins } from "./plugins/mod.ts";
 import { createVariablesFromContext } from "./template.ts";
 import type {
   DistConfig,
-  DistributionConfig,
   LogFunctions,
   PipelineOptions,
   PipelinePhase,
@@ -30,12 +29,10 @@ import { PipelineError } from "./types.ts";
  * Internal pipeline state.
  */
 interface PipelineState {
-  /** Current phase being executed */
-  currentPhase: PipelinePhase | null;
   /** Phase results */
-  phaseResults: Record<PipelinePhase, PluginPhaseResult | undefined>;
+  readonly phaseResults: Record<PipelinePhase, PluginPhaseResult | undefined>;
   /** Start time */
-  startTime: number;
+  readonly startTime: number;
   /** Whether the pipeline has been aborted */
   aborted: boolean;
   /** Abort reason */
@@ -75,6 +72,54 @@ function createLogFunctions(verbose: boolean, distName: string): LogFunctions {
 }
 
 // =============================================================================
+// Config Loading
+// =============================================================================
+
+/** Cached config record to avoid re-reading file multiple times */
+let cachedConfigRecord: Record<string, unknown> | null = null;
+let cachedConfigPath: string | null = null;
+
+/**
+ * Load the current deno.json config as a record for template variables.
+ * Results are cached per config path.
+ */
+async function loadConfigAsRecord(configPath = "deno.json"): Promise<Record<string, unknown>> {
+  // Return cached if same path
+  if (cachedConfigRecord !== null && cachedConfigPath === configPath) {
+    return cachedConfigRecord;
+  }
+
+  try {
+    const content = await Deno.readTextFile(configPath);
+    cachedConfigRecord = JSON.parse(content) as Record<string, unknown>;
+    cachedConfigPath = configPath;
+    return cachedConfigRecord;
+  } catch {
+    try {
+      const jsoncPath = configPath.replace(/\.json$/, ".jsonc");
+      const content = await Deno.readTextFile(jsoncPath);
+      // Simple JSONC handling - remove comments
+      const cleaned = content.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+      cachedConfigRecord = JSON.parse(cleaned) as Record<string, unknown>;
+      cachedConfigPath = jsoncPath;
+      return cachedConfigRecord;
+    } catch {
+      cachedConfigRecord = {};
+      cachedConfigPath = configPath;
+      return cachedConfigRecord;
+    }
+  }
+}
+
+/**
+ * Clear the config cache. Useful for testing.
+ */
+export function clearConfigCache(): void {
+  cachedConfigRecord = null;
+  cachedConfigPath = null;
+}
+
+// =============================================================================
 // Pipeline Execution
 // =============================================================================
 
@@ -107,7 +152,6 @@ export async function runPipeline(
 
   // Initialize state
   const state: PipelineState = {
-    currentPhase: null,
     phaseResults: {
       preprocess: undefined,
       transform: undefined,
@@ -121,27 +165,15 @@ export async function runPipeline(
 
   // Clean output directory if requested
   if (options.clean) {
-    log.info(`Cleaning output directory: ${outputDir}`);
-    try {
-      await Deno.remove(outputDir, { recursive: true });
-    } catch (error) {
-      if (!(error instanceof Deno.errors.NotFound)) {
-        throw new PipelineError(
-          `Failed to clean output directory: ${String(error)}`,
-          "preprocess",
-        );
-      }
-    }
+    await cleanOutputDirectory(outputDir, log);
   }
 
   // Ensure output directory exists
   await ensureDir(outputDir);
 
   // Create template variables
-  const variables = createVariablesFromContext(
-    await loadConfigAsRecord(),
-    options.scope ?? {},
-  );
+  const configRecord = await loadConfigAsRecord();
+  const variables = createVariablesFromContext(configRecord, options.scope ?? {});
 
   // Resolve plugins
   const plugins = await resolvePlugins(distConfig.plugins, distConfig);
@@ -161,59 +193,20 @@ export async function runPipeline(
     variables,
   };
 
-  // Run phases
-  try {
-    // Preprocess phase
-    state.phaseResults.preprocess = await runPhase(
-      "preprocess",
-      plugins,
-      context,
-      state,
-      log,
-    );
-    if (!state.phaseResults.preprocess.success) {
+  // Run phases sequentially
+  const phases: PipelinePhase[] = ["preprocess", "transform", "postprocess"];
+
+  for (const phase of phases) {
+    if (state.aborted) break;
+
+    // deno-lint-ignore no-await-in-loop
+    const result = await runPhase(phase, plugins, context, log);
+    (state.phaseResults as Record<PipelinePhase, PluginPhaseResult | undefined>)[phase] = result;
+
+    if (!result.success) {
       state.aborted = true;
-      state.abortReason = `Preprocess failed: ${state.phaseResults.preprocess.error}`;
+      state.abortReason = `${capitalize(phase)} failed: ${result.error}`;
     }
-
-    // Transform phase
-    if (!state.aborted) {
-      state.phaseResults.transform = await runPhase(
-        "transform",
-        plugins,
-        context,
-        state,
-        log,
-      );
-      if (!state.phaseResults.transform.success) {
-        state.aborted = true;
-        state.abortReason = `Transform failed: ${state.phaseResults.transform.error}`;
-      }
-    }
-
-    // Postprocess phase
-    if (!state.aborted) {
-      state.phaseResults.postprocess = await runPhase(
-        "postprocess",
-        plugins,
-        context,
-        state,
-        log,
-      );
-      if (!state.phaseResults.postprocess.success) {
-        state.aborted = true;
-        state.abortReason = `Postprocess failed: ${state.phaseResults.postprocess.error}`;
-      }
-    }
-  } catch (error) {
-    log.error(`Pipeline error: ${String(error)}`);
-    return {
-      success: false,
-      phases: state.phaseResults,
-      totalDurationMs: Date.now() - state.startTime,
-      distributionName: distName,
-      outputDir,
-    };
   }
 
   const totalDurationMs = Date.now() - state.startTime;
@@ -235,16 +228,39 @@ export async function runPipeline(
 }
 
 /**
+ * Clean the output directory.
+ */
+async function cleanOutputDirectory(outputDir: string, log: LogFunctions): Promise<void> {
+  log.info(`Cleaning output directory: ${outputDir}`);
+  try {
+    await Deno.remove(outputDir, { recursive: true });
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      throw new PipelineError(
+        `Failed to clean output directory: ${String(error)}`,
+        "preprocess",
+      );
+    }
+  }
+}
+
+/**
+ * Capitalize the first letter of a string.
+ */
+function capitalize(str: string): string {
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+/**
  * Run a single pipeline phase across all plugins.
+ * Plugins are executed sequentially to maintain order guarantees.
  */
 async function runPhase(
   phase: PipelinePhase,
   plugins: readonly ResolvedPlugin[],
   context: PluginContext,
-  state: PipelineState,
   log: LogFunctions,
 ): Promise<PluginPhaseResult> {
-  state.currentPhase = phase;
   log.info(`Starting ${phase} phase...`);
 
   const startTime = Date.now();
@@ -272,6 +288,7 @@ async function runPhase(
     };
 
     try {
+      // Sequential execution is intentional - plugins may depend on previous results
       // deno-lint-ignore no-await-in-loop
       const result = await handler.call(plugin, pluginContext);
 
@@ -307,7 +324,7 @@ async function runPhase(
   }
 
   const durationMs = Date.now() - startTime;
-  log.info(`${phase} phase completed in ${durationMs}ms`);
+  log.info(`${capitalize(phase)} phase completed in ${durationMs}ms`);
 
   return {
     success: true,
@@ -334,6 +351,7 @@ export async function runPipelineAll(
   // deno-lint-ignore no-console
   console.log(`Building ${distNames.length} distribution(s)...`);
 
+  // Run distributions sequentially - they may share resources
   for (const distName of distNames) {
     // deno-lint-ignore no-await-in-loop
     const result = await runPipeline(distName, config, options);
@@ -348,61 +366,4 @@ export async function runPipelineAll(
   console.log(`\nBuild summary: ${successful} succeeded, ${failed} failed`);
 
   return results;
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-/**
- * Load the current deno.json config as a record for template variables.
- */
-async function loadConfigAsRecord(): Promise<Record<string, unknown>> {
-  try {
-    const content = await Deno.readTextFile("deno.json");
-    return JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    try {
-      const content = await Deno.readTextFile("deno.jsonc");
-      // Simple JSONC handling - remove comments
-      const cleaned = content.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-      return JSON.parse(cleaned) as Record<string, unknown>;
-    } catch {
-      return {};
-    }
-  }
-}
-
-/**
- * Create a context for a specific distribution.
- */
-export function createPipelineContext(
-  distName: string,
-  distConfig: DistributionConfig,
-  config: DistConfig,
-  options: PipelineOptions = {},
-): PluginContext {
-  const distDir = config.distDir ?? "target";
-  const outputDir = join(distDir, distName);
-  const sourceDir = Deno.cwd();
-  const verbose = options.verbose ?? false;
-  const log = createLogFunctions(verbose, distName);
-
-  return {
-    distConfig,
-    sourceDir,
-    outputDir,
-    pluginConfig: {
-      options: {},
-      verbose,
-      workingDir: sourceDir,
-    },
-    log,
-    variables: {
-      env: Deno.env.toObject(),
-      config: {},
-      captures: {},
-      custom: options.scope ?? {},
-    },
-  };
 }

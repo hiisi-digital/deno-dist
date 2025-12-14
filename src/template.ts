@@ -6,7 +6,6 @@
  * - Capture variables: @{=varName}
  * - Environment variables: @{env.VAR_NAME}
  * - Config namespace: @{config.field}
- * - CLI scope variables: @{scope.key}
  * - Custom variables: @{customVar}
  *
  * Template markers in files:
@@ -41,7 +40,7 @@ export interface ParsedVariable {
 }
 
 // =============================================================================
-// Constants
+// Constants - Pre-compiled Regex Patterns
 // =============================================================================
 
 /** Pattern for template variables: @{...} */
@@ -56,6 +55,12 @@ const RANGE_START_PATTERN = /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s+@start
 /** Pattern for range end markers: <!-- --dist-template: name @end --> */
 const RANGE_END_PATTERN = /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s+@end\s*-->/g;
 
+/** Pattern for capture variables in patterns */
+const CAPTURE_PATTERN = /@\{=([^}]+)\}/g;
+
+/** Characters that need escaping in regex */
+const REGEX_ESCAPE_PATTERN = /[.*+?^${}()|[\]\\]/g;
+
 // =============================================================================
 // Variable Creation
 // =============================================================================
@@ -69,7 +74,6 @@ const RANGE_END_PATTERN = /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s+@end\s*-
 export function createVariables(options?: {
   env?: Record<string, string>;
   config?: Record<string, unknown>;
-  scope?: Record<string, string>;
   captures?: Record<string, string>;
   custom?: Record<string, string>;
 }): TemplateVariables {
@@ -94,28 +98,26 @@ export function createVariablesFromContext(
   config: Record<string, unknown>,
   scope: Record<string, string> = {},
 ): TemplateVariables {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(Deno.env.toObject())) {
-    env[key] = value;
-  }
-
   // Merge static scope from metadata.dist.scope with CLI-provided scope
   const staticScope = getNestedValue(config, "metadata.dist.scope") as
     | Record<string, string>
     | undefined;
-  const custom = { ...staticScope, ...scope };
 
   return {
-    env,
+    env: Deno.env.toObject(),
     config,
     captures: {},
-    custom,
+    custom: { ...staticScope, ...scope },
   };
 }
 
 // =============================================================================
 // Variable Parsing
 // =============================================================================
+
+/** Prefix constants for variable types */
+const PREFIX_ENV = "env.";
+const PREFIX_CONFIG = "config.";
 
 /**
  * Parse a template variable string into its components.
@@ -128,41 +130,21 @@ export function parseVariable(variableText: string): ParsedVariable {
 
   // Capture variable: =varName
   if (variableText.startsWith("=")) {
-    return {
-      raw,
-      type: "capture",
-      key: variableText.slice(1),
-      isCapture: true,
-    };
+    return { raw, type: "capture", key: variableText.slice(1), isCapture: true };
   }
 
   // Environment variable: env.VAR_NAME
-  if (variableText.startsWith("env.")) {
-    return {
-      raw,
-      type: "env",
-      key: variableText.slice(4),
-      isCapture: false,
-    };
+  if (variableText.startsWith(PREFIX_ENV)) {
+    return { raw, type: "env", key: variableText.slice(PREFIX_ENV.length), isCapture: false };
   }
 
   // Config namespace: config.field
-  if (variableText.startsWith("config.")) {
-    return {
-      raw,
-      type: "config",
-      key: variableText.slice(7),
-      isCapture: false,
-    };
+  if (variableText.startsWith(PREFIX_CONFIG)) {
+    return { raw, type: "config", key: variableText.slice(PREFIX_CONFIG.length), isCapture: false };
   }
 
   // Custom variable (no prefix)
-  return {
-    raw,
-    type: "custom",
-    key: variableText,
-    isCapture: false,
-  };
+  return { raw, type: "custom", key: variableText, isCapture: false };
 }
 
 /**
@@ -173,10 +155,11 @@ export function parseVariable(variableText: string): ParsedVariable {
  */
 export function findVariables(text: string): readonly ParsedVariable[] {
   const variables: ParsedVariable[] = [];
-  const pattern = new RegExp(VARIABLE_PATTERN.source, "g");
-  let match: RegExpExecArray | null;
+  // Reset lastIndex for global regex reuse
+  VARIABLE_PATTERN.lastIndex = 0;
 
-  while ((match = pattern.exec(text)) !== null) {
+  let match: RegExpExecArray | null;
+  while ((match = VARIABLE_PATTERN.exec(text)) !== null) {
     variables.push(parseVariable(match[1]));
   }
 
@@ -227,10 +210,7 @@ function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
   let current: unknown = obj;
 
   for (const part of parts) {
-    if (current === null || current === undefined) {
-      return undefined;
-    }
-    if (typeof current !== "object") {
+    if (current === null || current === undefined || typeof current !== "object") {
       return undefined;
     }
     current = (current as Record<string, unknown>)[part];
@@ -290,14 +270,15 @@ export function extractCaptures(
 ): Record<string, string> {
   const captures: Record<string, string> = {};
   const captureNames: string[] = [];
-
-  // First, find all capture variable positions and names
-  const capturePattern = /@\{=([^}]+)\}/g;
   const parts: Array<{ type: "literal" | "capture"; value: string }> = [];
+
+  // Reset lastIndex for global regex reuse
+  CAPTURE_PATTERN.lastIndex = 0;
+
   let lastIndex = 0;
   let captureMatch: RegExpExecArray | null;
 
-  while ((captureMatch = capturePattern.exec(pattern)) !== null) {
+  while ((captureMatch = CAPTURE_PATTERN.exec(pattern)) !== null) {
     // Add literal part before this capture
     if (captureMatch.index > lastIndex) {
       parts.push({
@@ -314,6 +295,11 @@ export function extractCaptures(
   // Add remaining literal part
   if (lastIndex < pattern.length) {
     parts.push({ type: "literal", value: pattern.slice(lastIndex) });
+  }
+
+  // If no captures found, return empty
+  if (captureNames.length === 0) {
+    return captures;
   }
 
   // Build regex pattern by escaping literals and inserting capture groups
@@ -344,7 +330,7 @@ export function applyCaptures(
   pattern: string,
   captures: Record<string, string>,
 ): string {
-  return pattern.replace(/@\{=([^}]+)\}/g, (_match, name: string) => {
+  return pattern.replace(CAPTURE_PATTERN, (_match, name: string) => {
     return captures[name] ?? "";
   });
 }
@@ -354,7 +340,7 @@ export function applyCaptures(
  * Exported for use by plugins and other modules.
  */
 export function escapeRegex(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(REGEX_ESCAPE_PATTERN, "\\$&");
 }
 
 // =============================================================================
@@ -369,23 +355,45 @@ export function escapeRegex(text: string): string {
  */
 export function findTemplateMarkers(content: string): readonly TemplateMarker[] {
   const markers: TemplateMarker[] = [];
-  const foundRanges = new Map<string, { start: number; startMarker: string }>();
+  const rangeMarkers = findRangeMarkers(content);
+  const rangeNames = new Set(rangeMarkers.map((m) => m.name));
+
+  // Add range markers
+  markers.push(...rangeMarkers);
+
+  // Find single insertion markers (that are not part of ranges)
+  findSingleMarkers(content, markers, rangeNames);
+
+  // Sort by start index
+  markers.sort((a, b) => a.startIndex - b.startIndex);
+
+  return markers;
+}
+
+/**
+ * Find range markers (start/end pairs).
+ */
+function findRangeMarkers(content: string): TemplateMarker[] {
+  const markers: TemplateMarker[] = [];
+  const rangeStarts = new Map<string, { start: number; startMarker: string }>();
+
+  // Reset patterns
+  RANGE_START_PATTERN.lastIndex = 0;
+  RANGE_END_PATTERN.lastIndex = 0;
 
   // Find range start markers
   let match: RegExpExecArray | null;
-  const startPattern = new RegExp(RANGE_START_PATTERN.source, "g");
-  while ((match = startPattern.exec(content)) !== null) {
-    foundRanges.set(match[1], {
+  while ((match = RANGE_START_PATTERN.exec(content)) !== null) {
+    rangeStarts.set(match[1], {
       start: match.index,
       startMarker: match[0],
     });
   }
 
   // Find range end markers and create range markers
-  const endPattern = new RegExp(RANGE_END_PATTERN.source, "g");
-  while ((match = endPattern.exec(content)) !== null) {
+  while ((match = RANGE_END_PATTERN.exec(content)) !== null) {
     const name = match[1];
-    const rangeStart = foundRanges.get(name);
+    const rangeStart = rangeStarts.get(name);
     if (rangeStart) {
       markers.push({
         name,
@@ -394,41 +402,54 @@ export function findTemplateMarkers(content: string): readonly TemplateMarker[] 
         endIndex: match.index + match[0].length,
         markerText: content.slice(rangeStart.start, match.index + match[0].length),
       });
-      foundRanges.delete(name);
+      rangeStarts.delete(name);
     }
   }
 
-  // Find single insertion markers (that are not part of ranges)
-  const singlePattern = new RegExp(SINGLE_MARKER_PATTERN.source, "g");
-  while ((match = singlePattern.exec(content)) !== null) {
+  return markers;
+}
+
+/**
+ * Find single insertion markers that don't overlap with ranges.
+ */
+function findSingleMarkers(
+  content: string,
+  markers: TemplateMarker[],
+  _rangeNames: Set<string>,
+): void {
+  SINGLE_MARKER_PATTERN.lastIndex = 0;
+
+  let match: RegExpExecArray | null;
+  while ((match = SINGLE_MARKER_PATTERN.exec(content)) !== null) {
     const name = match[1];
-    // Check if this is actually a range marker by looking for @start or @end
+    const index = match.index;
+
+    // Skip if this is part of a range (name matches a range name)
+    // Check surrounding text for @start or @end keywords
     const surroundingText = content.slice(
-      Math.max(0, match.index - 20),
-      match.index + match[0].length + 20,
+      Math.max(0, index - 20),
+      index + match[0].length + 20,
     );
     if (surroundingText.includes("@start") || surroundingText.includes("@end")) {
       continue;
     }
-    // Check if this position overlaps with any range
+
+    // Skip if this position overlaps with any existing range marker
     const overlapsRange = markers.some(
-      (m) => m.mode === "range" && match!.index >= m.startIndex && match!.index < (m.endIndex ?? 0),
+      (m) => m.mode === "range" && index >= m.startIndex && index < (m.endIndex ?? 0),
     );
-    if (!overlapsRange) {
-      markers.push({
-        name,
-        mode: "single" as TemplateInsertionMode,
-        startIndex: match.index,
-        endIndex: match.index + match[0].length,
-        markerText: match[0],
-      });
+    if (overlapsRange) {
+      continue;
     }
+
+    markers.push({
+      name,
+      mode: "single" as TemplateInsertionMode,
+      startIndex: index,
+      endIndex: index + match[0].length,
+      markerText: match[0],
+    });
   }
-
-  // Sort by start index
-  markers.sort((a, b) => a.startIndex - b.startIndex);
-
-  return markers;
 }
 
 // =============================================================================
@@ -491,28 +512,42 @@ export function processTemplate(
         result.slice(marker.endIndex);
     } else {
       // Range replacement: replace everything between start and end markers
-      // Keep the markers but replace content between them
-      const startMarkerMatch = result.slice(marker.startIndex).match(
-        /<!--\s*--dist-template:\s*[a-zA-Z0-9_-]+\s+@start\s*-->/,
-      );
-      const endMarkerMatch = result.slice(0, marker.endIndex).match(
-        /<!--\s*--dist-template:\s*[a-zA-Z0-9_-]+\s+@end\s*-->[^]*$/,
-      );
-
-      if (startMarkerMatch && endMarkerMatch) {
-        const startMarkerEnd = marker.startIndex + startMarkerMatch[0].length;
-        const endMarkerStart = marker.endIndex! - endMarkerMatch[0].length;
-
-        result = result.slice(0, startMarkerEnd) +
-          "\n" +
-          templateContent +
-          "\n" +
-          result.slice(endMarkerStart);
-      }
+      result = processRangeMarker(result, marker, templateContent);
     }
   }
 
   return result;
+}
+
+/**
+ * Process a range marker replacement.
+ */
+function processRangeMarker(
+  content: string,
+  marker: TemplateMarker,
+  templateContent: string,
+): string {
+  // Find where the start marker ends
+  const startMarkerMatch = content.slice(marker.startIndex).match(
+    /<!--\s*--dist-template:\s*[a-zA-Z0-9_-]+\s+@start\s*-->/,
+  );
+  // Find where the end marker starts
+  const endMarkerMatch = content.slice(0, marker.endIndex).match(
+    /<!--\s*--dist-template:\s*[a-zA-Z0-9_-]+\s+@end\s*-->[^]*$/,
+  );
+
+  if (startMarkerMatch && endMarkerMatch) {
+    const startMarkerEnd = marker.startIndex + startMarkerMatch[0].length;
+    const endMarkerStart = marker.endIndex! - endMarkerMatch[0].length;
+
+    return content.slice(0, startMarkerEnd) +
+      "\n" +
+      templateContent +
+      "\n" +
+      content.slice(endMarkerStart);
+  }
+
+  return content;
 }
 
 /**
@@ -541,22 +576,34 @@ export function applyReplacements(
     const hasCaptures = matchPattern.includes("@{=");
 
     if (hasCaptures) {
-      // Use capture-based replacement
-      const captures = extractCaptures(result, matchPattern);
-      if (Object.keys(captures).length > 0) {
-        const replacement = applyCaptures(resolvedReplace, captures);
-        // Create a regex from the match pattern to do the replacement
-        const regex = new RegExp(
-          escapeRegex(matchPattern).replace(/@\{=([^}]+)\}/g, "(.+?)"),
-          "g",
-        );
-        result = result.replace(regex, replacement);
-      }
+      result = applyCaptureReplacement(result, matchPattern, resolvedReplace);
     } else {
-      // Simple string replacement
+      // Simple string replacement using split/join for efficiency
       result = result.split(resolvedMatch).join(resolvedReplace);
     }
   }
 
   return result;
+}
+
+/**
+ * Apply a capture-based replacement.
+ */
+function applyCaptureReplacement(
+  content: string,
+  matchPattern: string,
+  replacePattern: string,
+): string {
+  const captures = extractCaptures(content, matchPattern);
+  if (Object.keys(captures).length === 0) {
+    return content;
+  }
+
+  const replacement = applyCaptures(replacePattern, captures);
+  // Create a regex from the match pattern to do the replacement
+  const regex = new RegExp(
+    escapeRegex(matchPattern).replace(/@\\\{=([^}]+)\\\}/g, "(.+?)"),
+    "g",
+  );
+  return content.replace(regex, replacement);
 }

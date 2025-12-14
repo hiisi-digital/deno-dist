@@ -8,21 +8,109 @@
 import { parseArgs } from "@std/cli";
 import { loadDistConfig, validateConfig } from "./config.ts";
 import { runPipeline, runPipelineAll } from "./pipeline.ts";
-import type { CliArgs, CliCommand, PipelineOptions } from "./types.ts";
+import type { CliArgs, CliCommand, PipelineOptions, RuntimeId } from "./types.ts";
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-const VERSION = "0.1.0";
 const PROGRAM_NAME = "deno-dist";
+
+// Runtime configuration maps - consolidated switch statement logic
+const RUNTIME_SETUP_ACTIONS: Readonly<Record<RuntimeId, string>> = {
+  deno: "denoland/setup-deno@v2",
+  node: "actions/setup-node@v4",
+  bun: "oven-sh/setup-bun@v2",
+};
+
+const RUNTIME_VERSION_KEYS: Readonly<Record<RuntimeId, string>> = {
+  deno: "deno-version",
+  node: "node-version",
+  bun: "bun-version",
+};
+
+const RUNTIME_TEST_COMMANDS: Readonly<Record<RuntimeId, string>> = {
+  deno: "deno test",
+  node: "npm test",
+  bun: "bun test",
+};
+
+const RUNTIME_DEFAULT_VERSIONS: Readonly<Record<RuntimeId, readonly string[]>> = {
+  deno: ["v2.x"],
+  node: ["18", "20", "22"],
+  bun: ["latest"],
+};
+
+const RUNTIME_DEFAULT_REGISTRIES: Readonly<Record<RuntimeId, string>> = {
+  deno: "jsr",
+  node: "npm",
+  bun: "npm",
+};
+
+// =============================================================================
+// Version Loading
+// =============================================================================
+
+/**
+ * Get the package version from deno.json.
+ * Falls back to "0.0.0" if not readable.
+ */
+async function getVersion(): Promise<string> {
+  try {
+    const moduleUrl = new URL("../deno.json", import.meta.url);
+    const content = await Deno.readTextFile(moduleUrl);
+    const config = JSON.parse(content) as { version?: string };
+    return config.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+// =============================================================================
+// Logger Utility
+// =============================================================================
+
+/**
+ * Logger interface for CLI output.
+ */
+interface Logger {
+  log(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+}
+
+/**
+ * Create a console logger.
+ */
+function createLogger(): Logger {
+  return {
+    log(message: string): void {
+      // deno-lint-ignore no-console
+      console.log(message);
+    },
+    warn(message: string): void {
+      // deno-lint-ignore no-console
+      console.warn(message);
+    },
+    error(message: string): void {
+      // deno-lint-ignore no-console
+      console.error(message);
+    },
+  };
+}
+
+const logger = createLogger();
 
 // =============================================================================
 // Help Text
 // =============================================================================
 
-const HELP_TEXT = `
-${PROGRAM_NAME} v${VERSION}
+/**
+ * Generate help text with current version.
+ */
+function createHelpText(version: string): string {
+  return `
+${PROGRAM_NAME} v${version}
 Universal distribution tool for Deno projects
 
 USAGE:
@@ -48,6 +136,7 @@ EXAMPLES:
   deno task dist validate
   deno task dist update-workflows
 `;
+}
 
 // =============================================================================
 // Argument Parsing
@@ -73,16 +162,7 @@ function parseCliArgs(args: string[]): CliArgs {
   const positional = parsed._.slice(1).map(String);
 
   // Parse scope variables
-  const scope: Record<string, string> = {};
-  if (parsed.scope) {
-    const pairs = parsed.scope.split(",");
-    for (const pair of pairs) {
-      const [key, value] = pair.split("=");
-      if (key && value !== undefined) {
-        scope[key.trim()] = value.trim();
-      }
-    }
-  }
+  const scope = parseScopeString(parsed.scope);
 
   return {
     command,
@@ -97,6 +177,26 @@ function parseCliArgs(args: string[]): CliArgs {
     },
     scope,
   };
+}
+
+/**
+ * Parse scope string (key=value,key2=value2) into a record.
+ */
+function parseScopeString(scopeStr: string | undefined): Record<string, string> {
+  const scope: Record<string, string> = {};
+  if (!scopeStr) return scope;
+
+  for (const pair of scopeStr.split(",")) {
+    const eqIndex = pair.indexOf("=");
+    if (eqIndex > 0) {
+      const key = pair.slice(0, eqIndex).trim();
+      const value = pair.slice(eqIndex + 1).trim();
+      if (key) {
+        scope[key] = value;
+      }
+    }
+  }
+  return scope;
 }
 
 // =============================================================================
@@ -117,32 +217,12 @@ const buildCommand: CliCommand = {
     const clean = args.flags.clean as boolean;
     const buildAll = args.flags.all as boolean;
 
-    // Load configuration
-    let config;
-    try {
-      config = await loadDistConfig(configPath);
-    } catch (error) {
-      // deno-lint-ignore no-console
-      console.error(`Failed to load config: ${String(error)}`);
+    // Load and validate configuration
+    const configResult = await loadAndValidateConfig(configPath);
+    if (!configResult.success) {
       return 1;
     }
-
-    // Validate configuration
-    const validation = validateConfig(config);
-    if (!validation.valid) {
-      // deno-lint-ignore no-console
-      console.error("Configuration errors:");
-      for (const err of validation.errors) {
-        // deno-lint-ignore no-console
-        console.error(`  - ${err}`);
-      }
-      return 1;
-    }
-
-    for (const warning of validation.warnings) {
-      // deno-lint-ignore no-console
-      console.warn(`Warning: ${warning}`);
-    }
+    const config = configResult.config;
 
     const pipelineOptions: PipelineOptions = {
       verbose,
@@ -160,18 +240,14 @@ const buildCommand: CliCommand = {
     // Build specific distribution
     const distName = args.positional[0];
     if (!distName) {
-      // deno-lint-ignore no-console
-      console.error("Error: Distribution name required. Use --all to build all.");
-      // deno-lint-ignore no-console
-      console.error(`Available distributions: ${Object.keys(config.distributions).join(", ")}`);
+      logger.error("Error: Distribution name required. Use --all to build all.");
+      logger.error(`Available distributions: ${Object.keys(config.distributions).join(", ")}`);
       return 1;
     }
 
     if (!config.distributions[distName]) {
-      // deno-lint-ignore no-console
-      console.error(`Error: Distribution "${distName}" not found.`);
-      // deno-lint-ignore no-console
-      console.error(`Available distributions: ${Object.keys(config.distributions).join(", ")}`);
+      logger.error(`Error: Distribution "${distName}" not found.`);
+      logger.error(`Available distributions: ${Object.keys(config.distributions).join(", ")}`);
       return 1;
     }
 
@@ -191,50 +267,40 @@ const validateCommand: CliCommand = {
   async handler(args: CliArgs): Promise<number> {
     const configPath = args.flags.config as string;
 
-    // deno-lint-ignore no-console
-    console.log(`Validating configuration: ${configPath}`);
+    logger.log(`Validating configuration: ${configPath}`);
 
     let config;
     try {
       config = await loadDistConfig(configPath);
     } catch (error) {
-      // deno-lint-ignore no-console
-      console.error(`Failed to load config: ${String(error)}`);
+      logger.error(`Failed to load config: ${String(error)}`);
       return 1;
     }
 
     const validation = validateConfig(config);
 
     if (validation.errors.length > 0) {
-      // deno-lint-ignore no-console
-      console.error("\nErrors:");
+      logger.error("\nErrors:");
       for (const err of validation.errors) {
-        // deno-lint-ignore no-console
-        console.error(`  \u2717 ${err}`);
+        logger.error(`  \u2717 ${err}`);
       }
     }
 
     if (validation.warnings.length > 0) {
-      // deno-lint-ignore no-console
-      console.warn("\nWarnings:");
+      logger.warn("\nWarnings:");
       for (const warning of validation.warnings) {
-        // deno-lint-ignore no-console
-        console.warn(`  \u26A0 ${warning}`);
+        logger.warn(`  \u26A0 ${warning}`);
       }
     }
 
     if (validation.valid) {
-      // deno-lint-ignore no-console
-      console.log("\n\u2713 Configuration is valid");
-      // deno-lint-ignore no-console
-      console.log(`  Distributions: ${Object.keys(config.distributions).join(", ") || "(none)"}`);
-      // deno-lint-ignore no-console
-      console.log(`  Output directory: ${config.distDir}`);
+      logger.log("\n\u2713 Configuration is valid");
+      logger.log(`  Distributions: ${Object.keys(config.distributions).join(", ") || "(none)"}`);
+      logger.log(`  Output directory: ${config.distDir}`);
       return 0;
     }
 
-    // deno-lint-ignore no-console
-    console.error("\n\u2717 Configuration is invalid");
+    logger.error("\n\u2717 Configuration is invalid");
     return 1;
   },
 };
@@ -251,15 +317,13 @@ const updateWorkflowsCommand: CliCommand = {
     const configPath = args.flags.config as string;
     const verbose = args.flags.verbose as boolean;
 
-    // deno-lint-ignore no-console
-    console.log("Generating GitHub Actions workflows...");
+    logger.log("Generating GitHub Actions workflows...");
 
     let config;
     try {
       config = await loadDistConfig(configPath);
     } catch (error) {
-      // deno-lint-ignore no-console
-      console.error(`Failed to load config: ${String(error)}`);
+      logger.error(`Failed to load config: ${String(error)}`);
       return 1;
     }
 
@@ -276,20 +340,22 @@ const updateWorkflowsCommand: CliCommand = {
     const writeOperations: Array<{ path: string; content: string }> = [];
 
     for (const [distName, distConfig] of Object.entries(config.distributions)) {
+      const runtime = distConfig.runtime;
+
       // Generate test workflow
-      const testWorkflow = generateTestWorkflow(distName, distConfig.runtime, distConfig.versions);
-      const testWorkflowPath = `${workflowsDir}/test-${distName}.yml`;
-      writeOperations.push({ path: testWorkflowPath, content: testWorkflow });
+      const testWorkflow = generateTestWorkflow(distName, runtime, distConfig.versions);
+      writeOperations.push({
+        path: `${workflowsDir}/test-${distName}.yml`,
+        content: testWorkflow,
+      });
 
       // Generate publish workflow if publish config exists
       if (distConfig.publish) {
-        const publishWorkflow = generatePublishWorkflow(
-          distName,
-          distConfig.runtime,
-          distConfig.publish,
-        );
-        const publishWorkflowPath = `${workflowsDir}/publish-${distName}.yml`;
-        writeOperations.push({ path: publishWorkflowPath, content: publishWorkflow });
+        const publishWorkflow = generatePublishWorkflow(distName, runtime, distConfig.publish);
+        writeOperations.push({
+          path: `${workflowsDir}/publish-${distName}.yml`,
+          content: publishWorkflow,
+        });
       }
     }
 
@@ -300,15 +366,11 @@ const updateWorkflowsCommand: CliCommand = {
 
     if (verbose) {
       for (const op of writeOperations) {
-        // deno-lint-ignore no-console
-        console.log(`  Generated: ${op.path}`);
+        logger.log(`  Generated: ${op.path}`);
       }
     }
 
-    const generated = writeOperations.length;
-
-    // deno-lint-ignore no-console
-    console.log(`\n\u2713 Generated ${generated} workflow(s)`);
+    logger.log(`\n\u2713 Generated ${writeOperations.length} workflow(s)`);
     return 0;
   },
 };
@@ -321,10 +383,10 @@ const helpCommand: CliCommand = {
   description: "Show help message",
   aliases: ["h"],
 
-  handler(_args: CliArgs): Promise<number> {
-    // deno-lint-ignore no-console
-    console.log(HELP_TEXT);
-    return Promise.resolve(0);
+  async handler(_args: CliArgs): Promise<number> {
+    const version = await getVersion();
+    logger.log(createHelpText(version));
+    return 0;
   },
 };
 
@@ -336,12 +398,52 @@ const versionCommand: CliCommand = {
   description: "Show version",
   aliases: [],
 
-  handler(_args: CliArgs): Promise<number> {
-    // deno-lint-ignore no-console
-    console.log(`${PROGRAM_NAME} v${VERSION}`);
-    return Promise.resolve(0);
+  async handler(_args: CliArgs): Promise<number> {
+    const version = await getVersion();
+    logger.log(`${PROGRAM_NAME} v${version}`);
+    return 0;
   },
 };
+
+// =============================================================================
+// Shared Command Helpers
+// =============================================================================
+
+/**
+ * Result of config loading and validation.
+ */
+interface ConfigLoadResult {
+  success: boolean;
+  config: Awaited<ReturnType<typeof loadDistConfig>>;
+}
+
+/**
+ * Load and validate configuration, logging errors.
+ */
+async function loadAndValidateConfig(configPath: string): Promise<ConfigLoadResult> {
+  let config;
+  try {
+    config = await loadDistConfig(configPath);
+  } catch (error) {
+    logger.error(`Failed to load config: ${String(error)}`);
+    return { success: false, config: { distDir: "target", distributions: {} } };
+  }
+
+  const validation = validateConfig(config);
+  if (!validation.valid) {
+    logger.error("Configuration errors:");
+    for (const err of validation.errors) {
+      logger.error(`  - ${err}`);
+    }
+    return { success: false, config };
+  }
+
+  for (const warning of validation.warnings) {
+    logger.warn(`Warning: ${warning}`);
+  }
+
+  return { success: true, config };
+}
 
 // =============================================================================
 // Workflow Generation
@@ -352,12 +454,15 @@ const versionCommand: CliCommand = {
  */
 function generateTestWorkflow(
   distName: string,
-  runtime: string,
+  runtime: RuntimeId,
   versions?: readonly string[],
 ): string {
-  const runtimeVersions = versions ?? getDefaultVersions(runtime);
-  const setupAction = getSetupAction(runtime);
-  const testCommand = getTestCommand(runtime);
+  const runtimeVersions = versions ?? RUNTIME_DEFAULT_VERSIONS[runtime] ?? ["latest"];
+  const setupAction = RUNTIME_SETUP_ACTIONS[runtime] ?? RUNTIME_SETUP_ACTIONS.node;
+  const versionKey = RUNTIME_VERSION_KEYS[runtime] ?? RUNTIME_VERSION_KEYS.node;
+  const testCommand = RUNTIME_TEST_COMMANDS[runtime] ?? RUNTIME_TEST_COMMANDS.node;
+
+  const versionsJson = runtimeVersions.map((v) => `"${v}"`).join(", ");
 
   return `# Auto-generated by deno-dist
 name: Test ${distName}
@@ -374,7 +479,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [${runtimeVersions.map((v) => `"${v}"`).join(", ")}]
+        version: [${versionsJson}]
 
     steps:
       - uses: actions/checkout@v4
@@ -382,7 +487,7 @@ jobs:
       - name: Setup ${runtime}
         uses: ${setupAction}
         with:
-          ${getVersionKey(runtime)}: \${{ matrix.version }}
+          ${versionKey}: \${{ matrix.version }}
 
       - name: Build distribution
         run: deno task dist build ${distName}
@@ -398,11 +503,12 @@ jobs:
  */
 function generatePublishWorkflow(
   distName: string,
-  runtime: string,
+  runtime: RuntimeId,
   publishConfig: { registry?: string; provenance?: boolean },
 ): string {
-  const registry = publishConfig.registry ?? getDefaultRegistry(runtime);
+  const registry = publishConfig.registry ?? RUNTIME_DEFAULT_REGISTRIES[runtime] ?? "npm";
   const provenance = publishConfig.provenance ?? true;
+  const publishCommand = getPublishCommand(runtime, registry, provenance);
 
   return `# Auto-generated by deno-dist
 name: Publish ${distName}
@@ -432,94 +538,15 @@ jobs:
         run: deno task dist build ${distName}
 
       - name: Publish to ${registry}
-        run: ${getPublishCommand(runtime, registry, provenance)}
+        run: ${publishCommand}
         working-directory: ./target/${distName}
 `;
 }
 
 /**
- * Get default versions for a runtime.
- */
-function getDefaultVersions(runtime: string): string[] {
-  switch (runtime) {
-    case "deno":
-      return ["v2.x"];
-    case "node":
-      return ["18", "20", "22"];
-    case "bun":
-      return ["latest"];
-    default:
-      return ["latest"];
-  }
-}
-
-/**
- * Get the setup action for a runtime.
- */
-function getSetupAction(runtime: string): string {
-  switch (runtime) {
-    case "deno":
-      return "denoland/setup-deno@v2";
-    case "node":
-      return "actions/setup-node@v4";
-    case "bun":
-      return "oven-sh/setup-bun@v2";
-    default:
-      return "actions/setup-node@v4";
-  }
-}
-
-/**
- * Get the version key for a runtime setup action.
- */
-function getVersionKey(runtime: string): string {
-  switch (runtime) {
-    case "deno":
-      return "deno-version";
-    case "node":
-      return "node-version";
-    case "bun":
-      return "bun-version";
-    default:
-      return "node-version";
-  }
-}
-
-/**
- * Get the test command for a runtime.
- */
-function getTestCommand(runtime: string): string {
-  switch (runtime) {
-    case "deno":
-      return "deno test";
-    case "node":
-      return "npm test";
-    case "bun":
-      return "bun test";
-    default:
-      return "npm test";
-  }
-}
-
-/**
- * Get the default registry for a runtime.
- */
-function getDefaultRegistry(runtime: string): string {
-  switch (runtime) {
-    case "deno":
-      return "jsr";
-    case "node":
-    case "bun":
-      return "npm";
-    default:
-      return "npm";
-  }
-}
-
-/**
  * Get the publish command for a runtime and registry.
  */
-function getPublishCommand(runtime: string, registry: string, provenance: boolean): string {
+function getPublishCommand(runtime: RuntimeId, registry: string, provenance: boolean): string {
   if (registry === "jsr") {
     return "deno publish --allow-dirty";
   }
@@ -536,7 +563,7 @@ function getPublishCommand(runtime: string, registry: string, provenance: boolea
 // Command Registry
 // =============================================================================
 
-const commands: CliCommand[] = [
+const commands: readonly CliCommand[] = [
   buildCommand,
   validateCommand,
   updateWorkflowsCommand,
@@ -575,10 +602,8 @@ async function main(): Promise<number> {
   // Find and run command
   const command = findCommand(args.command);
   if (!command) {
-    // deno-lint-ignore no-console
-    console.error(`Unknown command: ${args.command}`);
-    // deno-lint-ignore no-console
-    console.error(`Run "${PROGRAM_NAME} --help" for usage.`);
+    logger.error(`Unknown command: ${args.command}`);
+    logger.error(`Run "${PROGRAM_NAME} --help" for usage.`);
     return 1;
   }
 

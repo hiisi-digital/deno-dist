@@ -40,20 +40,6 @@ export interface PluginRegistry {
   readonly plugins: Map<string, Plugin>;
 }
 
-/**
- * Custom script implementation for preprocess/transform/postprocess.
- */
-export interface CustomScript {
-  /** Script file path */
-  readonly path: string;
-  /** The loaded module */
-  readonly module: {
-    preprocess?(context: PluginContext): Promise<PluginPhaseResult>;
-    transform?(context: PluginContext): Promise<PluginPhaseResult>;
-    postprocess?(context: PluginContext): Promise<PluginPhaseResult>;
-  };
-}
-
 // =============================================================================
 // Plugin Registry
 // =============================================================================
@@ -62,6 +48,9 @@ export interface CustomScript {
 const registry: PluginRegistry = {
   plugins: new Map(),
 };
+
+/** Memoized plugin load promises to avoid duplicate imports */
+const loadPromises = new Map<string, Promise<Plugin>>();
 
 /**
  * Register a plugin in the global registry.
@@ -91,52 +80,71 @@ export function listPlugins(): readonly string[] {
   return [...registry.plugins.keys()];
 }
 
+/**
+ * Clear the plugin registry and load cache.
+ * Useful for testing.
+ */
+export function clearPluginCache(): void {
+  registry.plugins.clear();
+  loadPromises.clear();
+}
+
 // =============================================================================
-// Plugin Loading
+// Plugin Validation
 // =============================================================================
 
 /**
- * Load a plugin by ID or path.
- *
- * @param id Plugin ID or file path
- * @returns Loaded plugin
- * @throws PluginError if plugin cannot be loaded
+ * Validate that a plugin has the required structure.
  */
-export async function loadPlugin(id: string): Promise<Plugin> {
-  // Check registry first
-  const registered = registry.plugins.get(id);
-  if (registered) {
-    return registered;
+function validatePluginMetadata(metadata: unknown): metadata is PluginMetadata {
+  if (!metadata || typeof metadata !== "object") {
+    return false;
+  }
+  const m = metadata as Record<string, unknown>;
+  return (
+    typeof m.id === "string" &&
+    m.id.length > 0 &&
+    typeof m.name === "string" &&
+    typeof m.version === "string"
+  );
+}
+
+/**
+ * Check if an object is a valid plugin.
+ */
+function isValidPlugin(obj: unknown): obj is Plugin {
+  if (!obj || typeof obj !== "object") {
+    return false;
+  }
+  const plugin = obj as Record<string, unknown>;
+
+  // Must have valid metadata
+  if (!validatePluginMetadata(plugin.metadata)) {
+    return false;
   }
 
-  // Check for built-in plugins
-  const builtin = await loadBuiltinPlugin(id);
-  if (builtin) {
-    registerPlugin(builtin);
-    return builtin;
+  // If phase methods exist, they must be functions
+  for (const phase of ["preprocess", "transform", "postprocess"]) {
+    if (phase in plugin && typeof plugin[phase] !== "function") {
+      return false;
+    }
   }
 
-  // Try to load as external module
-  try {
-    const module = await import(id);
-    if (!isValidPlugin(module.default)) {
-      throw new PluginError(
-        `Module "${id}" does not export a valid plugin`,
-        id,
-      );
-    }
-    const plugin = module.default as Plugin;
-    registerPlugin(plugin);
-    return plugin;
-  } catch (error) {
-    if (error instanceof PluginError) {
-      throw error;
-    }
-    throw new PluginError(
-      `Failed to load plugin "${id}": ${String(error)}`,
-      id,
-    );
-  }
+  return true;
+}
+
+// =============================================================================
+// Built-in Plugin Loading
+// =============================================================================
+
+/** Built-in plugin IDs */
+const BUILTIN_PLUGINS = new Set(["deno-to-node", "deno-to-bun", "deno-passthrough"]);
+
+/**
+ * Check if a plugin ID is a built-in plugin.
+ */
+function isBuiltinPlugin(id: string): boolean {
+  return BUILTIN_PLUGINS.has(id);
 }
 
 /**
@@ -155,23 +163,81 @@ async function loadBuiltinPlugin(id: string): Promise<Plugin | undefined> {
   }
 }
 
+// =============================================================================
+// Plugin Loading
+// =============================================================================
+
 /**
- * Check if an object is a valid plugin.
+ * Load a plugin by ID or path.
+ * Results are memoized to avoid duplicate imports.
+ *
+ * @param id Plugin ID or file path
+ * @returns Loaded plugin
+ * @throws PluginError if plugin cannot be loaded
  */
-function isValidPlugin(obj: unknown): obj is Plugin {
-  if (!obj || typeof obj !== "object") {
-    return false;
+export async function loadPlugin(id: string): Promise<Plugin> {
+  // Check registry first (already loaded)
+  const registered = registry.plugins.get(id);
+  if (registered) {
+    return registered;
   }
-  const plugin = obj as Record<string, unknown>;
-  if (!plugin.metadata || typeof plugin.metadata !== "object") {
-    return false;
+
+  // Check for in-flight load promise (deduplication)
+  const existingPromise = loadPromises.get(id);
+  if (existingPromise) {
+    return existingPromise;
   }
-  const metadata = plugin.metadata as Record<string, unknown>;
-  return (
-    typeof metadata.id === "string" &&
-    typeof metadata.name === "string" &&
-    typeof metadata.version === "string"
-  );
+
+  // Create and cache the load promise
+  const loadPromise = doLoadPlugin(id);
+  loadPromises.set(id, loadPromise);
+
+  try {
+    const plugin = await loadPromise;
+    registerPlugin(plugin);
+    return plugin;
+  } catch (error) {
+    // Remove failed promise from cache
+    loadPromises.delete(id);
+    throw error;
+  }
+}
+
+/**
+ * Internal plugin loading implementation.
+ */
+async function doLoadPlugin(id: string): Promise<Plugin> {
+  // Check for built-in plugins
+  if (isBuiltinPlugin(id)) {
+    const builtin = await loadBuiltinPlugin(id);
+    if (builtin) {
+      return builtin;
+    }
+  }
+
+  // Try to load as external module
+  try {
+    const module = await import(id);
+    const plugin = module.default ?? module;
+
+    if (!isValidPlugin(plugin)) {
+      throw new PluginError(
+        `Module "${id}" does not export a valid plugin. ` +
+          "Plugins must have a metadata object with id, name, and version fields.",
+        id,
+      );
+    }
+
+    return plugin;
+  } catch (error) {
+    if (error instanceof PluginError) {
+      throw error;
+    }
+    throw new PluginError(
+      `Failed to load plugin "${id}": ${String(error)}`,
+      id,
+    );
+  }
 }
 
 // =============================================================================
@@ -192,18 +258,12 @@ export async function resolvePlugins(
   references: readonly PluginReference[] | undefined,
   distConfig: DistributionConfig,
 ): Promise<readonly ResolvedPlugin[]> {
+  const hasCustomScripts = distConfig.preprocess || distConfig.transform || distConfig.postprocess;
+
   if (!references || references.length === 0) {
     // If no plugins specified but custom scripts exist, run them
-    const hasCustomScripts = distConfig.preprocess || distConfig.transform ||
-      distConfig.postprocess;
     if (hasCustomScripts) {
-      return [
-        {
-          plugin: createCustomScriptPlugin(distConfig),
-          config: { id: "@this" },
-          isThis: true,
-        },
-      ];
+      return [createThisPlugin(distConfig)];
     }
     return [];
   }
@@ -211,28 +271,29 @@ export async function resolvePlugins(
   // Normalize all references first
   const normalized = references.map(normalizeReference);
 
-  // Separate @this from plugins that need loading
-  const pluginsToLoad = normalized.filter((c) => c.id !== "@this");
+  // Identify plugins that need loading (not @this)
+  const pluginsToLoad = normalized
+    .filter((c) => c.id !== "@this")
+    .map((c) => c.id);
 
-  // Load all plugins in parallel
+  // Deduplicate plugin IDs
+  const uniquePluginIds = [...new Set(pluginsToLoad)];
+
+  // Load all unique plugins in parallel
   const loadedPlugins = await Promise.all(
-    pluginsToLoad.map((c) => loadPlugin(c.id)),
+    uniquePluginIds.map((id) => loadPlugin(id)),
   );
 
   // Create a map for quick lookup
   const pluginMap = new Map<string, Plugin>();
-  pluginsToLoad.forEach((c, i) => {
-    pluginMap.set(c.id, loadedPlugins[i]);
+  uniquePluginIds.forEach((id, i) => {
+    pluginMap.set(id, loadedPlugins[i]);
   });
 
   // Build resolved array maintaining order
-  const resolved: ResolvedPlugin[] = normalized.map((config) => {
+  return normalized.map((config) => {
     if (config.id === "@this") {
-      return {
-        plugin: createCustomScriptPlugin(distConfig),
-        config,
-        isThis: true,
-      };
+      return createThisPlugin(distConfig);
     }
     return {
       plugin: pluginMap.get(config.id)!,
@@ -240,18 +301,24 @@ export async function resolvePlugins(
       isThis: false,
     };
   });
-
-  return resolved;
 }
 
 /**
  * Normalize a plugin reference to an InlinePluginConfig.
  */
 function normalizeReference(ref: PluginReference): InlinePluginConfig {
-  if (typeof ref === "string") {
-    return { id: ref };
-  }
-  return ref;
+  return typeof ref === "string" ? { id: ref } : ref;
+}
+
+/**
+ * Create a resolved plugin for @this (custom scripts).
+ */
+function createThisPlugin(distConfig: DistributionConfig): ResolvedPlugin {
+  return {
+    plugin: createCustomScriptPlugin(distConfig),
+    config: { id: "@this" },
+    isThis: true,
+  };
 }
 
 /**
@@ -301,29 +368,25 @@ async function runCustomScript(
 
   try {
     const module = await import(scriptPath);
-    const handler = module[phase] || module.default?.[phase];
+    const handler = module[phase] ?? module.default?.[phase];
 
     if (typeof handler !== "function") {
       return {
         success: false,
         error: `Script "${scriptPath}" does not export a "${phase}" function`,
-      };
-    }
-
-    const result = await handler(context);
-
-    // Normalize result
-    if (typeof result === "object" && result !== null) {
-      return {
-        ...result,
         durationMs: Date.now() - startTime,
       };
     }
 
-    return {
-      success: true,
-      durationMs: Date.now() - startTime,
-    };
+    const result = await handler(context);
+    const durationMs = Date.now() - startTime;
+
+    // Normalize result
+    if (typeof result === "object" && result !== null) {
+      return { ...result, durationMs };
+    }
+
+    return { success: true, durationMs };
   } catch (error) {
     return {
       success: false,

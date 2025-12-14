@@ -6,8 +6,16 @@
  * import remapping and Deno-specific API shims.
  */
 
-import { escapeRegex } from "../template.ts";
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
+import {
+  collectFiles,
+  type CopyResult,
+  ensureDirectory,
+  escapeRegex,
+  getDirectory,
+  getRelativePath,
+  tryCopyFile,
+} from "./utils.ts";
 
 // =============================================================================
 // Plugin Metadata
@@ -57,11 +65,60 @@ export interface DenoToBunOptions {
 /**
  * Default import mappings from Deno to Bun/Node equivalents.
  */
-const DEFAULT_MAPPINGS: Record<string, string> = {
+const DEFAULT_MAPPINGS: Readonly<Record<string, string>> = {
   "jsr:@std/assert": "bun:test",
   "jsr:@std/path": "node:path",
   "jsr:@std/fs": "node:fs/promises",
 };
+
+// =============================================================================
+// API Transformation Rules
+// =============================================================================
+
+/**
+ * API transformation rule.
+ */
+interface ApiTransformRule {
+  readonly pattern: RegExp;
+  readonly replacement: string;
+}
+
+/**
+ * Rules for transforming Deno APIs to Bun equivalents.
+ * Using pre-compiled regexes for efficiency.
+ */
+const API_TRANSFORM_RULES: readonly ApiTransformRule[] = [
+  // Deno.readTextFile -> Bun.file().text()
+  {
+    pattern: /Deno\.readTextFile\(([^)]+)\)/g,
+    replacement: "await Bun.file($1).text()",
+  },
+  // Deno.writeTextFile -> Bun.write()
+  {
+    pattern: /Deno\.writeTextFile\(([^,]+),\s*([^)]+)\)/g,
+    replacement: "await Bun.write($1, $2)",
+  },
+  // Deno.env.get -> Bun.env
+  {
+    pattern: /Deno\.env\.get\(([^)]+)\)/g,
+    replacement: "Bun.env[$1]",
+  },
+  // Deno.cwd() -> process.cwd()
+  {
+    pattern: /Deno\.cwd\(\)/g,
+    replacement: "process.cwd()",
+  },
+  // Deno.exit -> process.exit
+  {
+    pattern: /Deno\.exit\(/g,
+    replacement: "process.exit(",
+  },
+  // Deno.args -> Bun.argv.slice(2)
+  {
+    pattern: /Deno\.args\b/g,
+    replacement: "Bun.argv.slice(2)",
+  },
+];
 
 // =============================================================================
 // Plugin Implementation
@@ -131,34 +188,19 @@ const denoToBunPlugin: Plugin = {
     const mappings = { ...DEFAULT_MAPPINGS, ...options?.mappings };
 
     // Create output directory
-    await Deno.mkdir(context.outputDir, { recursive: true });
+    await ensureDirectory(context.outputDir);
 
-    // Copy and transform all TypeScript files
-    const files = await collectTypeScriptFiles(context.sourceDir);
+    // Collect TypeScript files (excluding tests)
+    const files = await collectFiles(context.sourceDir, {
+      extensions: [".ts", ".tsx"],
+      includeTests: false,
+      includeAssets: false,
+    });
 
     // Process all files in parallel
-    const processFile = async (file: string): Promise<string> => {
-      const relativePath = file.slice(context.sourceDir.length + 1);
-      const outputPath = `${context.outputDir}/${relativePath}`;
-
-      // Ensure directory exists
-      const outputDirPath = outputPath.substring(0, outputPath.lastIndexOf("/"));
-      if (outputDirPath) {
-        await Deno.mkdir(outputDirPath, { recursive: true });
-      }
-
-      // Read and transform content
-      let content = await Deno.readTextFile(file);
-      content = transformImports(content, mappings);
-      content = transformDenoAPIs(content);
-
-      // Write transformed content
-      await Deno.writeTextFile(outputPath, content);
-      context.log.debug(`Transformed: ${relativePath}`);
-      return outputPath;
-    };
-
-    const processedFiles = await Promise.all(files.map(processFile));
+    const processedFiles = await Promise.all(
+      files.map((file) => processFile(file, context, mappings)),
+    );
     affectedFiles.push(...processedFiles);
 
     // Generate package.json if requested
@@ -172,18 +214,8 @@ const denoToBunPlugin: Plugin = {
 
     // Copy additional files if specified
     const filesToCopy = options?.copyFiles ?? ["LICENSE", "README.md"];
-    const copyPromises = filesToCopy.map(async (file) => {
-      const srcPath = `${context.sourceDir}/${file}`;
-      const destPath = `${context.outputDir}/${file}`;
-      try {
-        await Deno.copyFile(srcPath, destPath);
-        return { file, destPath, success: true as const };
-      } catch {
-        return { file, success: false as const };
-      }
-    });
+    const copyResults = await copyAdditionalFiles(context, filesToCopy);
 
-    const copyResults = await Promise.all(copyPromises);
     for (const result of copyResults) {
       if (result.success) {
         affectedFiles.push(result.destPath);
@@ -225,22 +257,7 @@ const denoToBunPlugin: Plugin = {
     const sourcemap = options?.sourcemap ?? "external";
 
     try {
-      const args = [
-        "build",
-        entryPoint,
-        "--outdir",
-        "./dist",
-        "--target",
-        target,
-      ];
-
-      if (minify) {
-        args.push("--minify");
-      }
-
-      if (sourcemap !== "none") {
-        args.push("--sourcemap=" + sourcemap);
-      }
+      const args = buildBundleArgs(entryPoint, target, minify, sourcemap);
 
       const command = new Deno.Command("bun", {
         args,
@@ -281,31 +298,50 @@ const denoToBunPlugin: Plugin = {
 // =============================================================================
 
 /**
- * Recursively collect all TypeScript files in a directory.
+ * Process a single file - transform imports and APIs.
  */
-async function collectTypeScriptFiles(dir: string): Promise<string[]> {
-  const files: string[] = [];
+async function processFile(
+  file: string,
+  context: PluginContext,
+  mappings: Record<string, string>,
+): Promise<string> {
+  const relativePath = getRelativePath(file, context.sourceDir);
+  const outputPath = `${context.outputDir}/${relativePath}`;
 
-  for await (const entry of Deno.readDir(dir)) {
-    const path = `${dir}/${entry.name}`;
-
-    if (entry.isDirectory) {
-      // Skip common non-source directories
-      if (["node_modules", ".git", "target", "dist"].includes(entry.name)) {
-        continue;
-      }
-      const subFiles = await collectTypeScriptFiles(path);
-      files.push(...subFiles);
-    } else if (entry.isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx"))) {
-      // Skip test files
-      if (entry.name.includes(".test.") || entry.name.includes("_test.")) {
-        continue;
-      }
-      files.push(path);
-    }
+  // Ensure directory exists
+  const outputDirPath = getDirectory(outputPath);
+  if (outputDirPath) {
+    await ensureDirectory(outputDirPath);
   }
 
-  return files;
+  // Read and transform content
+  let content = await Deno.readTextFile(file);
+  content = transformImports(content, mappings);
+  content = transformDenoAPIs(content);
+
+  // Write transformed content
+  await Deno.writeTextFile(outputPath, content);
+  context.log.debug(`Transformed: ${relativePath}`);
+
+  return outputPath;
+}
+
+/**
+ * Copy additional files to the output directory.
+ */
+function copyAdditionalFiles(
+  context: PluginContext,
+  files: readonly string[],
+): Promise<CopyResult[]> {
+  return Promise.all(
+    files.map((file) =>
+      tryCopyFile(
+        `${context.sourceDir}/${file}`,
+        `${context.outputDir}/${file}`,
+        file,
+      )
+    ),
+  );
 }
 
 /**
@@ -315,17 +351,21 @@ function transformImports(content: string, mappings: Record<string, string>): st
   let result = content;
 
   for (const [from, to] of Object.entries(mappings)) {
+    // Pre-escape the 'from' pattern for use in regex
+    const escapedFrom = escapeRegex(from);
+
     // Handle various import patterns
     const patterns = [
-      new RegExp(`from\\s+["']${escapeRegex(from)}["']`, "g"),
-      new RegExp(`from\\s+["']${escapeRegex(from)}@[^"']+["']`, "g"),
-      new RegExp(`import\\s+["']${escapeRegex(from)}["']`, "g"),
+      // from "package"
+      new RegExp(`from\\s+["']${escapedFrom}["']`, "g"),
+      // from "package@version"
+      new RegExp(`from\\s+["']${escapedFrom}@[^"']+["']`, "g"),
+      // import "package" (side-effect import)
+      new RegExp(`import\\s+["']${escapedFrom}["']`, "g"),
     ];
 
     for (const pattern of patterns) {
-      result = result.replace(pattern, (match) => {
-        return match.replace(from, to);
-      });
+      result = result.replace(pattern, (match) => match.replace(from, to));
     }
   }
 
@@ -338,31 +378,42 @@ function transformImports(content: string, mappings: Record<string, string>): st
 function transformDenoAPIs(content: string): string {
   let result = content;
 
-  // Deno.readTextFile -> Bun.file().text()
-  result = result.replace(
-    /Deno\.readTextFile\(([^)]+)\)/g,
-    "await Bun.file($1).text()",
-  );
-
-  // Deno.writeTextFile -> Bun.write()
-  result = result.replace(
-    /Deno\.writeTextFile\(([^,]+),\s*([^)]+)\)/g,
-    "await Bun.write($1, $2)",
-  );
-
-  // Deno.env.get -> Bun.env or process.env
-  result = result.replace(/Deno\.env\.get\(([^)]+)\)/g, "Bun.env[$1]");
-
-  // Deno.cwd() -> process.cwd()
-  result = result.replace(/Deno\.cwd\(\)/g, "process.cwd()");
-
-  // Deno.exit -> process.exit
-  result = result.replace(/Deno\.exit\(/g, "process.exit(");
-
-  // Deno.args -> Bun.argv.slice(2) or process.argv.slice(2)
-  result = result.replace(/Deno\.args/g, "Bun.argv.slice(2)");
+  for (const rule of API_TRANSFORM_RULES) {
+    // Reset regex lastIndex for safety
+    rule.pattern.lastIndex = 0;
+    result = result.replace(rule.pattern, rule.replacement);
+  }
 
   return result;
+}
+
+/**
+ * Build the arguments array for bun build command.
+ */
+function buildBundleArgs(
+  entryPoint: string,
+  target: string,
+  minify: boolean,
+  sourcemap: string,
+): string[] {
+  const args = [
+    "build",
+    entryPoint,
+    "--outdir",
+    "./dist",
+    "--target",
+    target,
+  ];
+
+  if (minify) {
+    args.push("--minify");
+  }
+
+  if (sourcemap !== "none") {
+    args.push(`--sourcemap=${sourcemap}`);
+  }
+
+  return args;
 }
 
 /**
@@ -372,21 +423,24 @@ function generatePackageJson(
   context: PluginContext,
   options: DenoToBunOptions | undefined,
 ): Record<string, unknown> {
-  const name = context.variables.config["name"] as string | undefined ?? "package";
-  const version = context.variables.config["version"] as string | undefined ?? "0.0.0";
+  const name = (context.variables.config["name"] as string | undefined) ?? "package";
+  const version = (context.variables.config["version"] as string | undefined) ?? "0.0.0";
   const entryPoint = options?.entryPoint ?? "mod.ts";
+
+  const jsEntry = entryPoint.replace(/\.ts$/, ".js");
+  const dtsEntry = entryPoint.replace(/\.ts$/, ".d.ts");
 
   return {
     name,
     version,
     type: "module",
-    main: entryPoint.replace(/\.ts$/, ".js"),
-    module: entryPoint.replace(/\.ts$/, ".js"),
-    types: entryPoint.replace(/\.ts$/, ".d.ts"),
+    main: jsEntry,
+    module: jsEntry,
+    types: dtsEntry,
     exports: {
       ".": {
-        import: `./${entryPoint.replace(/\.ts$/, ".js")}`,
-        types: `./${entryPoint.replace(/\.ts$/, ".d.ts")}`,
+        import: `./${jsEntry}`,
+        types: `./${dtsEntry}`,
       },
     },
     scripts: {

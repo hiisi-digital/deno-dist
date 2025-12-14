@@ -6,6 +6,7 @@
  */
 
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
+import { type CopyResult, ensureDirectory, tryCopyFile } from "./utils.ts";
 
 // =============================================================================
 // Plugin Metadata
@@ -49,16 +50,7 @@ export interface DenoToNodeOptions {
   /** Whether to run tests during build (default: false) */
   readonly test?: boolean;
   /** Shims to include */
-  readonly shims?: {
-    readonly deno?: boolean | "dev";
-    readonly timers?: boolean;
-    readonly prompts?: boolean;
-    readonly blob?: boolean;
-    readonly crypto?: boolean;
-    readonly undici?: boolean;
-    readonly weakRef?: boolean;
-    readonly webSocket?: boolean;
-  };
+  readonly shims?: DenoToNodeShims;
   /** Additional mappings for imports */
   readonly mappings?: Record<string, string>;
   /** Files to copy to output */
@@ -67,12 +59,33 @@ export interface DenoToNodeOptions {
   readonly postBuild?: string;
 }
 
+/**
+ * Shim configuration for dnt.
+ */
+export interface DenoToNodeShims {
+  readonly deno?: boolean | "dev";
+  readonly timers?: boolean;
+  readonly prompts?: boolean;
+  readonly blob?: boolean;
+  readonly crypto?: boolean;
+  readonly undici?: boolean;
+  readonly weakRef?: boolean;
+  readonly webSocket?: boolean;
+}
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+const DEFAULT_ENTRY_POINT = "mod.ts";
+const DNT_BUILD_SCRIPT_NAME = "_dnt_build.ts";
+
 // =============================================================================
 // Plugin Implementation
 // =============================================================================
 
 /**
- * Create the deno-to-node plugin.
+ * The deno-to-node plugin.
  */
 const denoToNodePlugin: Plugin = {
   metadata,
@@ -86,34 +99,41 @@ const denoToNodePlugin: Plugin = {
 
     context.log.info("Preparing Deno to Node.js transformation...");
 
-    // Validate that dnt is available
-    try {
-      // Check if dnt can be imported (this is a build-time check)
-      context.log.debug("Checking dnt availability...");
-    } catch {
-      return {
-        success: false,
-        error: "dnt (Deno to Node Transform) is required but not available",
-        durationMs: Date.now() - startTime,
-      };
-    }
-
     // Validate entry point exists
     const options = context.pluginConfig.options as DenoToNodeOptions | undefined;
-    const entryPoint = options?.entryPoint ?? "mod.ts";
+    const entryPoint = options?.entryPoint ?? DEFAULT_ENTRY_POINT;
     const fullEntryPath = `${context.sourceDir}/${entryPoint}`;
 
     try {
-      await Deno.stat(fullEntryPath);
-    } catch {
+      const stat = await Deno.stat(fullEntryPath);
+      if (!stat.isFile) {
+        return {
+          success: false,
+          error: `Entry point is not a file: ${fullEntryPath}`,
+          durationMs: Date.now() - startTime,
+        };
+      }
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) {
+        return {
+          success: false,
+          error: `Entry point not found: ${fullEntryPath}`,
+          durationMs: Date.now() - startTime,
+        };
+      }
       return {
         success: false,
-        error: `Entry point not found: ${fullEntryPath}`,
+        error: `Failed to check entry point: ${String(error)}`,
         durationMs: Date.now() - startTime,
       };
     }
 
     context.log.info(`Entry point validated: ${entryPoint}`);
+
+    // Warn about potential issues
+    if (options?.test && !options?.testPattern) {
+      warnings.push("Test is enabled but no testPattern specified - using default pattern");
+    }
 
     return {
       success: true,
@@ -132,15 +152,13 @@ const denoToNodePlugin: Plugin = {
     context.log.info("Transforming Deno code to Node.js using dnt...");
 
     const options = context.pluginConfig.options as DenoToNodeOptions | undefined;
-    const entryPoint = options?.entryPoint ?? "mod.ts";
-    const packageName = options?.packageName ??
-      context.variables.config["name"] as string | undefined ??
-      "package";
-    const packageVersion = options?.packageVersion ??
-      context.variables.config["version"] as string | undefined ??
-      "0.0.0";
+    const entryPoint = options?.entryPoint ?? DEFAULT_ENTRY_POINT;
 
-    // Build the dnt command
+    // Resolve package name and version from options or config
+    const packageName = resolvePackageName(options, context);
+    const packageVersion = resolvePackageVersion(options, context);
+
+    // Build the dnt script
     const buildScript = generateBuildScript({
       sourceDir: context.sourceDir,
       outputDir: context.outputDir,
@@ -155,76 +173,35 @@ const denoToNodePlugin: Plugin = {
       mappings: options?.mappings,
     });
 
+    // Ensure output directory exists
+    await ensureDirectory(context.outputDir);
+
     // Write the build script to a temp file
-    const tempScriptPath = `${context.outputDir}/_dnt_build.ts`;
-    await Deno.mkdir(context.outputDir, { recursive: true });
+    const tempScriptPath = `${context.outputDir}/${DNT_BUILD_SCRIPT_NAME}`;
     await Deno.writeTextFile(tempScriptPath, buildScript);
     affectedFiles.push(tempScriptPath);
 
     context.log.debug(`Build script written to: ${tempScriptPath}`);
 
     // Run the build script
-    try {
-      const command = new Deno.Command("deno", {
-        args: ["run", "-A", tempScriptPath],
-        cwd: context.sourceDir,
-        stdout: "piped",
-        stderr: "piped",
-      });
-
-      const { code, stdout, stderr } = await command.output();
-
-      if (context.pluginConfig.verbose) {
-        const stdoutText = new TextDecoder().decode(stdout);
-        const stderrText = new TextDecoder().decode(stderr);
-        if (stdoutText) {
-          context.log.debug(stdoutText);
-        }
-        if (stderrText) {
-          context.log.debug(stderrText);
-        }
-      }
-
-      if (code !== 0) {
-        const stderrText = new TextDecoder().decode(stderr);
-        return {
-          success: false,
-          error: `dnt build failed with exit code ${code}: ${stderrText}`,
-          durationMs: Date.now() - startTime,
-        };
-      }
-
-      context.log.info("dnt transformation completed successfully");
-    } catch (error) {
+    const runResult = await runDntBuild(tempScriptPath, context);
+    if (!runResult.success) {
       return {
         success: false,
-        error: `Failed to run dnt: ${String(error)}`,
+        error: runResult.error,
         durationMs: Date.now() - startTime,
       };
     }
 
+    context.log.info("dnt transformation completed successfully");
+
     // Clean up temp script
-    try {
-      await Deno.remove(tempScriptPath);
-    } catch {
-      // Ignore cleanup errors
-    }
+    await cleanupTempScript(tempScriptPath);
 
     // Copy additional files if specified
-    if (options?.copyFiles) {
-      const copyPromises = options.copyFiles.map(async (file) => {
-        const srcPath = `${context.sourceDir}/${file}`;
-        const destPath = `${context.outputDir}/${file}`;
-        try {
-          await Deno.copyFile(srcPath, destPath);
-          return { file, destPath, success: true as const };
-        } catch (error) {
-          return { file, error: String(error), success: false as const };
-        }
-      });
-
-      const results = await Promise.all(copyPromises);
-      for (const result of results) {
+    if (options?.copyFiles && options.copyFiles.length > 0) {
+      const copyResults = await copyAdditionalFiles(context, options.copyFiles);
+      for (const result of copyResults) {
         if (result.success) {
           affectedFiles.push(result.destPath);
           context.log.debug(`Copied: ${result.file}`);
@@ -253,28 +230,11 @@ const denoToNodePlugin: Plugin = {
 
     // Run post-build script if specified
     if (options?.postBuild) {
-      try {
-        const command = new Deno.Command("deno", {
-          args: ["run", "-A", options.postBuild],
-          cwd: context.outputDir,
-          stdout: "piped",
-          stderr: "piped",
-        });
-
-        const { code, stderr } = await command.output();
-
-        if (code !== 0) {
-          const stderrText = new TextDecoder().decode(stderr);
-          return {
-            success: false,
-            error: `Post-build script failed: ${stderrText}`,
-            durationMs: Date.now() - startTime,
-          };
-        }
-      } catch (error) {
+      const result = await runPostBuildScript(options.postBuild, context);
+      if (!result.success) {
         return {
           success: false,
-          error: `Failed to run post-build script: ${String(error)}`,
+          error: result.error,
           durationMs: Date.now() - startTime,
         };
       }
@@ -294,6 +254,149 @@ const denoToNodePlugin: Plugin = {
 // =============================================================================
 
 /**
+ * Resolve the package name from options or context.
+ */
+function resolvePackageName(
+  options: DenoToNodeOptions | undefined,
+  context: PluginContext,
+): string {
+  if (options?.packageName) {
+    return options.packageName;
+  }
+  const configName = context.variables.config["name"];
+  if (typeof configName === "string" && configName.length > 0) {
+    return configName;
+  }
+  return "package";
+}
+
+/**
+ * Resolve the package version from options or context.
+ */
+function resolvePackageVersion(
+  options: DenoToNodeOptions | undefined,
+  context: PluginContext,
+): string {
+  if (options?.packageVersion) {
+    return options.packageVersion;
+  }
+  const configVersion = context.variables.config["version"];
+  if (typeof configVersion === "string" && configVersion.length > 0) {
+    return configVersion;
+  }
+  return "0.0.0";
+}
+
+/**
+ * Run the dnt build script.
+ */
+async function runDntBuild(
+  scriptPath: string,
+  context: PluginContext,
+): Promise<{ success: true } | { success: false; error: string }> {
+  try {
+    const command = new Deno.Command("deno", {
+      args: ["run", "-A", scriptPath],
+      cwd: context.sourceDir,
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { code, stdout, stderr } = await command.output();
+    const decoder = new TextDecoder();
+
+    if (context.pluginConfig.verbose) {
+      const stdoutText = decoder.decode(stdout);
+      const stderrText = decoder.decode(stderr);
+      if (stdoutText) {
+        context.log.debug(stdoutText);
+      }
+      if (stderrText) {
+        context.log.debug(stderrText);
+      }
+    }
+
+    if (code !== 0) {
+      const stderrText = decoder.decode(stderr);
+      return {
+        success: false,
+        error: `dnt build failed with exit code ${code}: ${stderrText}`,
+      };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to run dnt: ${String(error)}`,
+    };
+  }
+}
+
+/**
+ * Run a post-build script.
+ */
+async function runPostBuildScript(
+  scriptPath: string,
+  context: PluginContext,
+): Promise<{ success: true } | { success: false; error: string }> {
+  try {
+    const command = new Deno.Command("deno", {
+      args: ["run", "-A", scriptPath],
+      cwd: context.outputDir,
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { code, stderr } = await command.output();
+
+    if (code !== 0) {
+      const stderrText = new TextDecoder().decode(stderr);
+      return {
+        success: false,
+        error: `Post-build script failed: ${stderrText}`,
+      };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to run post-build script: ${String(error)}`,
+    };
+  }
+}
+
+/**
+ * Clean up the temporary build script.
+ */
+async function cleanupTempScript(scriptPath: string): Promise<void> {
+  try {
+    await Deno.remove(scriptPath);
+  } catch {
+    // Ignore cleanup errors - not critical
+  }
+}
+
+/**
+ * Copy additional files to the output directory.
+ */
+function copyAdditionalFiles(
+  context: PluginContext,
+  files: readonly string[],
+): Promise<CopyResult[]> {
+  return Promise.all(
+    files.map((file) =>
+      tryCopyFile(
+        `${context.sourceDir}/${file}`,
+        `${context.outputDir}/${file}`,
+        file,
+      )
+    ),
+  );
+}
+
+/**
  * Generate the dnt build script content.
  */
 function generateBuildScript(options: {
@@ -306,32 +409,53 @@ function generateBuildScript(options: {
   esm: boolean;
   cjs: boolean;
   test: boolean;
-  shims?: DenoToNodeOptions["shims"];
+  shims?: DenoToNodeShims;
   mappings?: Record<string, string>;
 }): string {
-  const shimsConfig = options.shims ?? {};
+  const shims = options.shims ?? {};
 
-  const script = `
+  // Escape strings for safe embedding in JavaScript
+  const safeEntryPoint = escapeJsString(options.entryPoint);
+  const safeOutputDir = escapeJsString(options.outputDir);
+  const safePackageName = escapeJsString(options.packageName);
+  const safePackageVersion = escapeJsString(options.packageVersion);
+
+  // Build shims configuration
+  const shimsConfig = {
+    deno: shims.deno ?? "dev",
+    timers: shims.timers ?? false,
+    prompts: shims.prompts ?? false,
+    blob: shims.blob ?? false,
+    crypto: shims.crypto ?? false,
+    undici: shims.undici ?? false,
+    weakRef: shims.weakRef ?? false,
+    webSocket: shims.webSocket ?? false,
+  };
+
+  // Build mappings if provided
+  const mappingsLine = options.mappings ? `  mappings: ${JSON.stringify(options.mappings)},` : "";
+
+  return `// Auto-generated dnt build script
 import { build, emptyDir } from "jsr:@deno/dnt";
 
-await emptyDir("${options.outputDir}");
+await emptyDir(${safeOutputDir});
 
 await build({
-  entryPoints: ["${options.entryPoint}"],
-  outDir: "${options.outputDir}",
+  entryPoints: [${safeEntryPoint}],
+  outDir: ${safeOutputDir},
   shims: {
-    deno: ${JSON.stringify(shimsConfig.deno ?? "dev")},
-    timers: ${shimsConfig.timers ?? false},
-    prompts: ${shimsConfig.prompts ?? false},
-    blob: ${shimsConfig.blob ?? false},
-    crypto: ${shimsConfig.crypto ?? false},
-    undici: ${shimsConfig.undici ?? false},
-    weakRef: ${shimsConfig.weakRef ?? false},
-    webSocket: ${shimsConfig.webSocket ?? false},
+    deno: ${JSON.stringify(shimsConfig.deno)},
+    timers: ${shimsConfig.timers},
+    prompts: ${shimsConfig.prompts},
+    blob: ${shimsConfig.blob},
+    crypto: ${shimsConfig.crypto},
+    undici: ${shimsConfig.undici},
+    weakRef: ${shimsConfig.weakRef},
+    webSocket: ${shimsConfig.webSocket},
   },
   package: {
-    name: "${options.packageName}",
-    version: "${options.packageVersion}",
+    name: ${safePackageName},
+    version: ${safePackageVersion},
   },
   compilerOptions: {
     lib: ["ES2022", "DOM"],
@@ -341,19 +465,32 @@ await build({
   esModule: ${options.esm},
   scriptModule: ${options.cjs ? '"cjs"' : "false"},
   test: ${options.test},
-  ${options.mappings ? `mappings: ${JSON.stringify(options.mappings)},` : ""}
+${mappingsLine}
 });
 
 // Post-build: copy LICENSE and README if they exist
-try {
-  await Deno.copyFile("LICENSE", "${options.outputDir}/LICENSE");
-} catch { /* ignore */ }
-try {
-  await Deno.copyFile("README.md", "${options.outputDir}/README.md");
-} catch { /* ignore */ }
+const filesToCopy = ["LICENSE", "README.md"];
+for (const file of filesToCopy) {
+  try {
+    await Deno.copyFile(file, ${safeOutputDir} + "/" + file);
+  } catch {
+    // File doesn't exist, skip
+  }
+}
 `;
+}
 
-  return script;
+/**
+ * Escape a string for safe embedding in JavaScript.
+ */
+function escapeJsString(str: string): string {
+  const escaped = str
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+  return `"${escaped}"`;
 }
 
 // =============================================================================

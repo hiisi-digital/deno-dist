@@ -56,6 +56,61 @@ const VALID_RUNTIMES: readonly RuntimeId[] = ["deno", "node", "bun"];
 const DEFAULT_DIST_DIR = "target";
 
 // =============================================================================
+// Type Guards & Helpers
+// =============================================================================
+
+/**
+ * Check if a value is a non-null object.
+ */
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Check if a value is a valid runtime identifier.
+ */
+function isValidRuntime(value: unknown): value is RuntimeId {
+  return typeof value === "string" && VALID_RUNTIMES.includes(value as RuntimeId);
+}
+
+/**
+ * Safely convert a value to string if defined.
+ */
+function toOptionalString(value: unknown): string | undefined {
+  return value === undefined || value === null ? undefined : String(value);
+}
+
+/**
+ * Parse a value as an array of strings.
+ */
+function toStringArray(value: unknown, fieldName: string): readonly string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new ConfigError(`${fieldName} must be an array`);
+  }
+  return value.map(String);
+}
+
+/**
+ * Parse a value as a Record<string, string>.
+ */
+function toStringRecord(value: unknown, fieldName: string): Record<string, string> | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isObject(value)) {
+    throw new ConfigError(`${fieldName} must be an object`);
+  }
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    result[k] = String(v);
+  }
+  return result;
+}
+
+// =============================================================================
 // Config Loading
 // =============================================================================
 
@@ -100,17 +155,14 @@ export function parseDistConfig(content: string, sourcePath?: string): DistConfi
     throw new ConfigError(`Invalid JSON${source}: ${String(error)}`);
   }
 
-  if (!raw || typeof raw !== "object") {
+  if (!isObject(raw)) {
     throw new ConfigError("Configuration must be an object");
   }
 
   const distDir = typeof raw.distDir === "string" ? raw.distDir : DEFAULT_DIST_DIR;
-  const distributions = parseDistributions(raw.dist);
+  const distributions = parseDistributions(raw.dist as RawDistConfig | undefined);
 
-  return {
-    distDir,
-    distributions,
-  };
+  return { distDir, distributions };
 }
 
 /**
@@ -119,15 +171,15 @@ export function parseDistConfig(content: string, sourcePath?: string): DistConfi
 function parseDistributions(
   raw: RawDistConfig | undefined,
 ): Record<string, DistributionConfig> {
-  if (!raw || typeof raw !== "object") {
+  if (!isObject(raw)) {
     return {};
   }
 
   const distributions: Record<string, DistributionConfig> = {};
 
   for (const [name, value] of Object.entries(raw)) {
-    if (value && typeof value === "object") {
-      distributions[name] = parseDistributionConfig(name, value as Record<string, unknown>);
+    if (isObject(value)) {
+      distributions[name] = parseDistributionConfig(name, value);
     }
   }
 
@@ -141,28 +193,17 @@ function parseDistributionConfig(
   name: string,
   raw: Record<string, unknown>,
 ): DistributionConfig {
-  const runtime = parseRuntime(raw.runtime, name);
-  const versions = parseVersions(raw.versions);
-  const plugins = parsePlugins(raw.plugins);
-  const preprocess = parseOptionalString(raw.preprocess);
-  const transform = parseOptionalString(raw.transform);
-  const postprocess = parseOptionalString(raw.postprocess);
-  const templates = parseStringRecord(raw.templates);
-  const replacements = parseStringRecord(raw.replacements);
-  const test = parseTestConfig(raw.test);
-  const publish = parsePublishConfig(raw.publish);
-
   return {
-    runtime,
-    versions,
-    plugins,
-    preprocess,
-    transform,
-    postprocess,
-    templates,
-    replacements,
-    test,
-    publish,
+    runtime: parseRuntime(raw.runtime, name),
+    versions: toStringArray(raw.versions, "versions"),
+    plugins: parsePlugins(raw.plugins),
+    preprocess: toOptionalString(raw.preprocess),
+    transform: toOptionalString(raw.transform),
+    postprocess: toOptionalString(raw.postprocess),
+    templates: toStringRecord(raw.templates, "templates"),
+    replacements: toStringRecord(raw.replacements, "replacements"),
+    test: parseTestConfig(raw.test),
+    publish: parsePublishConfig(raw.publish),
   };
 }
 
@@ -175,26 +216,13 @@ function parseRuntime(value: unknown, distName: string): RuntimeId {
       `Distribution "${distName}" must have a "runtime" field`,
     );
   }
-  if (!VALID_RUNTIMES.includes(value as RuntimeId)) {
+  if (!isValidRuntime(value)) {
     throw new ConfigError(
       `Distribution "${distName}" has invalid runtime "${value}". ` +
         `Valid runtimes: ${VALID_RUNTIMES.join(", ")}`,
     );
   }
-  return value as RuntimeId;
-}
-
-/**
- * Parse versions array.
- */
-function parseVersions(value: unknown): readonly string[] | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (!Array.isArray(value)) {
-    throw new ConfigError("versions must be an array");
-  }
-  return value.map((v) => String(v));
+  return value;
 }
 
 /**
@@ -207,45 +235,23 @@ function parsePlugins(value: unknown): readonly PluginReference[] | undefined {
   if (!Array.isArray(value)) {
     throw new ConfigError("plugins must be an array");
   }
-  return value.map((v) => {
-    if (typeof v === "string") {
-      return v;
-    }
-    if (v && typeof v === "object" && "id" in v) {
-      return {
-        id: String((v as Record<string, unknown>).id),
-        options: (v as Record<string, unknown>).options as Record<string, unknown> | undefined,
-      };
-    }
-    throw new ConfigError("Each plugin must be a string or an object with an id field");
-  });
+  return value.map(parsePluginReference);
 }
 
 /**
- * Parse optional string field.
+ * Parse a single plugin reference.
  */
-function parseOptionalString(value: unknown): string | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
+function parsePluginReference(value: unknown): PluginReference {
+  if (typeof value === "string") {
+    return value;
   }
-  return String(value);
-}
-
-/**
- * Parse string record (templates, replacements).
- */
-function parseStringRecord(value: unknown): Record<string, string> | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
+  if (isObject(value) && "id" in value) {
+    return {
+      id: String(value.id),
+      options: value.options as Record<string, unknown> | undefined,
+    };
   }
-  if (typeof value !== "object") {
-    throw new ConfigError("Expected an object for templates/replacements");
-  }
-  const result: Record<string, string> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    result[k] = String(v);
-  }
-  return result;
+  throw new ConfigError("Each plugin must be a string or an object with an id field");
 }
 
 /**
@@ -255,15 +261,14 @@ function parseTestConfig(value: unknown): TestConfig | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (typeof value !== "object") {
+  if (!isObject(value)) {
     throw new ConfigError("test config must be an object");
   }
-  const raw = value as Record<string, unknown>;
   return {
-    command: parseOptionalString(raw.command),
-    setup: raw.setup && Array.isArray(raw.setup) ? raw.setup.map((s) => String(s)) : undefined,
-    timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
-    env: parseStringRecord(raw.env),
+    command: toOptionalString(value.command),
+    setup: Array.isArray(value.setup) ? value.setup.map(String) : undefined,
+    timeout: typeof value.timeout === "number" ? value.timeout : undefined,
+    env: toStringRecord(value.env, "test.env"),
   };
 }
 
@@ -274,15 +279,15 @@ function parsePublishConfig(value: unknown): PublishConfig | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (typeof value !== "object") {
+  if (!isObject(value)) {
     throw new ConfigError("publish config must be an object");
   }
-  const raw = value as Record<string, unknown>;
+  const access = value.access;
   return {
-    registry: parseOptionalString(raw.registry),
-    provenance: typeof raw.provenance === "boolean" ? raw.provenance : undefined,
-    access: raw.access === "public" || raw.access === "restricted" ? raw.access : undefined,
-    command: parseOptionalString(raw.command),
+    registry: toOptionalString(value.registry),
+    provenance: typeof value.provenance === "boolean" ? value.provenance : undefined,
+    access: access === "public" || access === "restricted" ? access : undefined,
+    command: toOptionalString(value.command),
   };
 }
 
@@ -321,11 +326,7 @@ export function validateConfig(config: DistConfig): ConfigValidationResult {
     validateDistribution(name, dist, errors, warnings);
   }
 
-  return {
-    valid: errors.length === 0,
-    errors,
-    warnings,
-  };
+  return { valid: errors.length === 0, errors, warnings };
 }
 
 /**
@@ -345,7 +346,7 @@ function validateDistribution(
   }
 
   // Validate runtime
-  if (!VALID_RUNTIMES.includes(dist.runtime)) {
+  if (!isValidRuntime(dist.runtime)) {
     errors.push(
       `${prefix}: invalid runtime "${dist.runtime}". ` +
         `Valid runtimes: ${VALID_RUNTIMES.join(", ")}`,
@@ -359,22 +360,7 @@ function validateDistribution(
 
   // Validate plugins
   if (dist.plugins) {
-    const hasThis = dist.plugins.some((p) =>
-      (typeof p === "string" && p === "@this") ||
-      (typeof p === "object" && p.id === "@this")
-    );
-    const hasCustomScript = dist.preprocess || dist.transform || dist.postprocess;
-
-    if (hasThis && !hasCustomScript) {
-      warnings.push(
-        `${prefix}: @this in plugins but no custom preprocess/transform/postprocess defined`,
-      );
-    }
-    if (hasCustomScript && !hasThis) {
-      warnings.push(
-        `${prefix}: custom scripts defined but @this not in plugins array - scripts won't run in order`,
-      );
-    }
+    validatePluginConfig(dist, prefix, warnings);
   }
 
   // Validate custom script paths
@@ -395,16 +381,40 @@ function validateDistribution(
   }
 
   // Validate test config
-  if (dist.test) {
-    if (dist.test.timeout !== undefined && dist.test.timeout < 0) {
-      errors.push(`${prefix}: test timeout cannot be negative`);
-    }
+  if (dist.test?.timeout !== undefined && dist.test.timeout < 0) {
+    errors.push(`${prefix}: test timeout cannot be negative`);
   }
 
   // Validate publish config
-  if (dist.publish) {
-    if (dist.publish.access && !["public", "restricted"].includes(dist.publish.access)) {
-      errors.push(`${prefix}: publish access must be "public" or "restricted"`);
-    }
+  if (dist.publish?.access && !["public", "restricted"].includes(dist.publish.access)) {
+    errors.push(`${prefix}: publish access must be "public" or "restricted"`);
+  }
+}
+
+/**
+ * Validate plugin configuration and @this usage.
+ */
+function validatePluginConfig(
+  dist: DistributionConfig,
+  prefix: string,
+  warnings: string[],
+): void {
+  if (!dist.plugins) return;
+
+  const hasThis = dist.plugins.some((p) =>
+    (typeof p === "string" && p === "@this") ||
+    (typeof p === "object" && p.id === "@this")
+  );
+  const hasCustomScript = dist.preprocess || dist.transform || dist.postprocess;
+
+  if (hasThis && !hasCustomScript) {
+    warnings.push(
+      `${prefix}: @this in plugins but no custom preprocess/transform/postprocess defined`,
+    );
+  }
+  if (hasCustomScript && !hasThis) {
+    warnings.push(
+      `${prefix}: custom scripts defined but @this not in plugins array - scripts won't run in order`,
+    );
   }
 }
