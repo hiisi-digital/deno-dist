@@ -358,8 +358,9 @@ export function applyCaptures(
 
 /**
  * Escape special regex characters in a string.
+ * Exported for use by plugins and other modules.
  */
-function escapeRegex(text: string): string {
+export function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 

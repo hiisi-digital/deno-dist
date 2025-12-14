@@ -6,6 +6,7 @@
  * import remapping and Deno-specific API shims.
  */
 
+import { escapeRegex } from "../template.ts";
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
 
 // =============================================================================
@@ -362,13 +363,6 @@ function transformDenoAPIs(content: string): string {
   result = result.replace(/Deno\.args/g, "Bun.argv.slice(2)");
 
   return result;
-}
-
-/**
- * Escape special regex characters in a string.
- */
-function escapeRegex(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
