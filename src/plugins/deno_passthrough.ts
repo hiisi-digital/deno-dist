@@ -9,10 +9,14 @@ import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from ".
 import {
   collectFiles,
   type CollectFilesOptions,
-  type CopyResult,
+  createTimer,
+  DEFAULT_COPY_FILES,
   ensureDirectory,
+  failureResult,
   getDirectory,
   getRelativePath,
+  runCommand,
+  successResult,
   tryCopyFile,
 } from "./utils.ts";
 
@@ -85,7 +89,7 @@ const denoPassthroughPlugin: Plugin = {
    * Preprocess phase: Validate configuration.
    */
   async preprocess(context: PluginContext): Promise<PluginPhaseResult> {
-    const startTime = Date.now();
+    const timer = createTimer();
 
     context.log.info("Preparing Deno passthrough...");
 
@@ -93,33 +97,25 @@ const denoPassthroughPlugin: Plugin = {
     try {
       const stat = await Deno.stat(context.sourceDir);
       if (!stat.isDirectory) {
-        return {
-          success: false,
-          error: `Source path is not a directory: ${context.sourceDir}`,
-          durationMs: Date.now() - startTime,
-        };
+        return failureResult(
+          `Source path is not a directory: ${context.sourceDir}`,
+          timer.elapsed(),
+        );
       }
     } catch {
-      return {
-        success: false,
-        error: `Source directory not found: ${context.sourceDir}`,
-        durationMs: Date.now() - startTime,
-      };
+      return failureResult(`Source directory not found: ${context.sourceDir}`, timer.elapsed());
     }
 
     context.log.info("Source directory validated");
 
-    return {
-      success: true,
-      durationMs: Date.now() - startTime,
-    };
+    return successResult({ durationMs: timer.elapsed() });
   },
 
   /**
    * Transform phase: Copy and optionally transform Deno code.
    */
   async transform(context: PluginContext): Promise<PluginPhaseResult> {
-    const startTime = Date.now();
+    const timer = createTimer();
     const affectedFiles: string[] = [];
 
     context.log.info("Copying Deno source files...");
@@ -145,12 +141,7 @@ const denoPassthroughPlugin: Plugin = {
 
     // Process all files in parallel
     const processedFiles = await Promise.all(
-      files.map((file) =>
-        processFile(file, context, {
-          stripComments,
-          transforms,
-        })
-      ),
+      files.map((file) => processFile(file, context, { stripComments, transforms })),
     );
     affectedFiles.push(...processedFiles);
 
@@ -163,9 +154,13 @@ const denoPassthroughPlugin: Plugin = {
       }
     }
 
-    // Copy additional files if specified
-    const filesToCopy = options?.copyFiles ?? ["LICENSE", "README.md"];
-    const copyResults = await copyAdditionalFiles(context, filesToCopy);
+    // Copy additional files
+    const filesToCopy = options?.copyFiles ?? DEFAULT_COPY_FILES;
+    const copyResults = await Promise.all(
+      filesToCopy.map((file) =>
+        tryCopyFile(`${context.sourceDir}/${file}`, `${context.outputDir}/${file}`, file)
+      ),
+    );
 
     for (const result of copyResults) {
       if (result.success) {
@@ -176,18 +171,14 @@ const denoPassthroughPlugin: Plugin = {
 
     context.log.info(`Passthrough completed. ${affectedFiles.length} files copied.`);
 
-    return {
-      success: true,
-      affectedFiles,
-      durationMs: Date.now() - startTime,
-    };
+    return successResult({ durationMs: timer.elapsed(), affectedFiles });
   },
 
   /**
    * Postprocess phase: Optional validation.
    */
   async postprocess(context: PluginContext): Promise<PluginPhaseResult> {
-    const startTime = Date.now();
+    const timer = createTimer();
 
     context.log.info("Validating Deno output...");
 
@@ -198,41 +189,25 @@ const denoPassthroughPlugin: Plugin = {
     } catch {
       // No mod.ts, skip validation
       context.log.info("No mod.ts found, skipping type check");
-      return {
-        success: true,
-        durationMs: Date.now() - startTime,
-      };
+      return successResult({ durationMs: timer.elapsed() });
     }
 
-    try {
-      const command = new Deno.Command("deno", {
-        args: ["check", "mod.ts"],
-        cwd: context.outputDir,
-        stdout: "piped",
-        stderr: "piped",
+    const result = await runCommand({
+      command: "deno",
+      args: ["check", "mod.ts"],
+      cwd: context.outputDir,
+    });
+
+    if (!result.success) {
+      context.log.warn(`Type check failed: ${result.stderr ?? result.error}`);
+      return successResult({
+        durationMs: timer.elapsed(),
+        warnings: [`Type check failed: ${result.stderr ?? result.error}`],
       });
-
-      const { code, stderr } = await command.output();
-
-      if (code !== 0) {
-        const stderrText = new TextDecoder().decode(stderr);
-        context.log.warn(`Type check failed: ${stderrText}`);
-        return {
-          success: true, // Non-fatal warning
-          warnings: [`Type check failed: ${stderrText}`],
-          durationMs: Date.now() - startTime,
-        };
-      }
-
-      context.log.info("Type check passed");
-    } catch (error) {
-      context.log.warn(`Could not run type check: ${String(error)}`);
     }
 
-    return {
-      success: true,
-      durationMs: Date.now() - startTime,
-    };
+    context.log.info("Type check passed");
+    return successResult({ durationMs: timer.elapsed() });
   },
 };
 
@@ -306,24 +281,6 @@ async function copyDenoConfig(context: PluginContext): Promise<string | null> {
       return null;
     }
   }
-}
-
-/**
- * Copy additional files to the output directory.
- */
-function copyAdditionalFiles(
-  context: PluginContext,
-  files: readonly string[],
-): Promise<CopyResult[]> {
-  return Promise.all(
-    files.map((file) =>
-      tryCopyFile(
-        `${context.sourceDir}/${file}`,
-        `${context.outputDir}/${file}`,
-        file,
-      )
-    ),
-  );
 }
 
 /**

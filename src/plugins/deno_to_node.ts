@@ -6,7 +6,16 @@
  */
 
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
-import { type CopyResult, ensureDirectory, tryCopyFile } from "./utils.ts";
+import {
+  createTimer,
+  DEFAULT_COPY_FILES,
+  DEFAULT_ENTRY_POINT,
+  ensureDirectory,
+  failureResult,
+  runDenoScript,
+  successResult,
+  tryCopyFile,
+} from "./utils.ts";
 
 // =============================================================================
 // Plugin Metadata
@@ -77,7 +86,6 @@ export interface DenoToNodeShims {
 // Constants
 // =============================================================================
 
-const DEFAULT_ENTRY_POINT = "mod.ts";
 const DNT_BUILD_SCRIPT_NAME = "_dnt_build.ts";
 
 // =============================================================================
@@ -94,38 +102,26 @@ const denoToNodePlugin: Plugin = {
    * Preprocess phase: Validate configuration and prepare environment.
    */
   async preprocess(context: PluginContext): Promise<PluginPhaseResult> {
-    const startTime = Date.now();
+    const timer = createTimer();
     const warnings: string[] = [];
 
     context.log.info("Preparing Deno to Node.js transformation...");
 
-    // Validate entry point exists
     const options = context.pluginConfig.options as DenoToNodeOptions | undefined;
     const entryPoint = options?.entryPoint ?? DEFAULT_ENTRY_POINT;
     const fullEntryPath = `${context.sourceDir}/${entryPoint}`;
 
+    // Validate entry point exists
     try {
       const stat = await Deno.stat(fullEntryPath);
       if (!stat.isFile) {
-        return {
-          success: false,
-          error: `Entry point is not a file: ${fullEntryPath}`,
-          durationMs: Date.now() - startTime,
-        };
+        return failureResult(`Entry point is not a file: ${fullEntryPath}`, timer.elapsed());
       }
     } catch (error) {
       if (error instanceof Deno.errors.NotFound) {
-        return {
-          success: false,
-          error: `Entry point not found: ${fullEntryPath}`,
-          durationMs: Date.now() - startTime,
-        };
+        return failureResult(`Entry point not found: ${fullEntryPath}`, timer.elapsed());
       }
-      return {
-        success: false,
-        error: `Failed to check entry point: ${String(error)}`,
-        durationMs: Date.now() - startTime,
-      };
+      return failureResult(`Failed to check entry point: ${String(error)}`, timer.elapsed());
     }
 
     context.log.info(`Entry point validated: ${entryPoint}`);
@@ -135,18 +131,14 @@ const denoToNodePlugin: Plugin = {
       warnings.push("Test is enabled but no testPattern specified - using default pattern");
     }
 
-    return {
-      success: true,
-      warnings: warnings.length > 0 ? warnings : undefined,
-      durationMs: Date.now() - startTime,
-    };
+    return successResult({ durationMs: timer.elapsed(), warnings });
   },
 
   /**
    * Transform phase: Run dnt to convert Deno code to Node.js.
    */
   async transform(context: PluginContext): Promise<PluginPhaseResult> {
-    const startTime = Date.now();
+    const timer = createTimer();
     const affectedFiles: string[] = [];
 
     context.log.info("Transforming Deno code to Node.js using dnt...");
@@ -184,13 +176,17 @@ const denoToNodePlugin: Plugin = {
     context.log.debug(`Build script written to: ${tempScriptPath}`);
 
     // Run the build script
-    const runResult = await runDntBuild(tempScriptPath, context);
+    const runResult = await runDenoScript(tempScriptPath, context.sourceDir);
     if (!runResult.success) {
-      return {
-        success: false,
-        error: runResult.error,
-        durationMs: Date.now() - startTime,
-      };
+      return failureResult(
+        `dnt build failed: ${runResult.stderr ?? runResult.error}`,
+        timer.elapsed(),
+      );
+    }
+
+    if (context.pluginConfig.verbose && runResult.success) {
+      if (runResult.stdout) context.log.debug(runResult.stdout);
+      if (runResult.stderr) context.log.debug(runResult.stderr);
     }
 
     context.log.info("dnt transformation completed successfully");
@@ -199,30 +195,30 @@ const denoToNodePlugin: Plugin = {
     await cleanupTempScript(tempScriptPath);
 
     // Copy additional files if specified
-    if (options?.copyFiles && options.copyFiles.length > 0) {
-      const copyResults = await copyAdditionalFiles(context, options.copyFiles);
-      for (const result of copyResults) {
-        if (result.success) {
-          affectedFiles.push(result.destPath);
-          context.log.debug(`Copied: ${result.file}`);
-        } else {
-          context.log.warn(`Failed to copy ${result.file}: ${result.error}`);
-        }
+    const filesToCopy = options?.copyFiles ?? DEFAULT_COPY_FILES;
+    const copyResults = await Promise.all(
+      filesToCopy.map((file) =>
+        tryCopyFile(`${context.sourceDir}/${file}`, `${context.outputDir}/${file}`, file)
+      ),
+    );
+
+    for (const result of copyResults) {
+      if (result.success) {
+        affectedFiles.push(result.destPath);
+        context.log.debug(`Copied: ${result.file}`);
+      } else {
+        context.log.warn(`Failed to copy ${result.file}: ${result.error}`);
       }
     }
 
-    return {
-      success: true,
-      affectedFiles,
-      durationMs: Date.now() - startTime,
-    };
+    return successResult({ durationMs: timer.elapsed(), affectedFiles });
   },
 
   /**
    * Postprocess phase: Run any post-build scripts and cleanup.
    */
   async postprocess(context: PluginContext): Promise<PluginPhaseResult> {
-    const startTime = Date.now();
+    const timer = createTimer();
 
     context.log.info("Running post-processing for Node.js output...");
 
@@ -230,22 +226,18 @@ const denoToNodePlugin: Plugin = {
 
     // Run post-build script if specified
     if (options?.postBuild) {
-      const result = await runPostBuildScript(options.postBuild, context);
+      const result = await runDenoScript(options.postBuild, context.outputDir);
       if (!result.success) {
-        return {
-          success: false,
-          error: result.error,
-          durationMs: Date.now() - startTime,
-        };
+        return failureResult(
+          `Post-build script failed: ${result.stderr ?? result.error}`,
+          timer.elapsed(),
+        );
       }
     }
 
     context.log.info("Post-processing completed");
 
-    return {
-      success: true,
-      durationMs: Date.now() - startTime,
-    };
+    return successResult({ durationMs: timer.elapsed() });
   },
 };
 
@@ -288,86 +280,6 @@ function resolvePackageVersion(
 }
 
 /**
- * Run the dnt build script.
- */
-async function runDntBuild(
-  scriptPath: string,
-  context: PluginContext,
-): Promise<{ success: true } | { success: false; error: string }> {
-  try {
-    const command = new Deno.Command("deno", {
-      args: ["run", "-A", scriptPath],
-      cwd: context.sourceDir,
-      stdout: "piped",
-      stderr: "piped",
-    });
-
-    const { code, stdout, stderr } = await command.output();
-    const decoder = new TextDecoder();
-
-    if (context.pluginConfig.verbose) {
-      const stdoutText = decoder.decode(stdout);
-      const stderrText = decoder.decode(stderr);
-      if (stdoutText) {
-        context.log.debug(stdoutText);
-      }
-      if (stderrText) {
-        context.log.debug(stderrText);
-      }
-    }
-
-    if (code !== 0) {
-      const stderrText = decoder.decode(stderr);
-      return {
-        success: false,
-        error: `dnt build failed with exit code ${code}: ${stderrText}`,
-      };
-    }
-
-    return { success: true };
-  } catch (error) {
-    return {
-      success: false,
-      error: `Failed to run dnt: ${String(error)}`,
-    };
-  }
-}
-
-/**
- * Run a post-build script.
- */
-async function runPostBuildScript(
-  scriptPath: string,
-  context: PluginContext,
-): Promise<{ success: true } | { success: false; error: string }> {
-  try {
-    const command = new Deno.Command("deno", {
-      args: ["run", "-A", scriptPath],
-      cwd: context.outputDir,
-      stdout: "piped",
-      stderr: "piped",
-    });
-
-    const { code, stderr } = await command.output();
-
-    if (code !== 0) {
-      const stderrText = new TextDecoder().decode(stderr);
-      return {
-        success: false,
-        error: `Post-build script failed: ${stderrText}`,
-      };
-    }
-
-    return { success: true };
-  } catch (error) {
-    return {
-      success: false,
-      error: `Failed to run post-build script: ${String(error)}`,
-    };
-  }
-}
-
-/**
  * Clean up the temporary build script.
  */
 async function cleanupTempScript(scriptPath: string): Promise<void> {
@@ -376,24 +288,6 @@ async function cleanupTempScript(scriptPath: string): Promise<void> {
   } catch {
     // Ignore cleanup errors - not critical
   }
-}
-
-/**
- * Copy additional files to the output directory.
- */
-function copyAdditionalFiles(
-  context: PluginContext,
-  files: readonly string[],
-): Promise<CopyResult[]> {
-  return Promise.all(
-    files.map((file) =>
-      tryCopyFile(
-        `${context.sourceDir}/${file}`,
-        `${context.outputDir}/${file}`,
-        file,
-      )
-    ),
-  );
 }
 
 /**

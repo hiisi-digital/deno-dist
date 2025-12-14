@@ -2,8 +2,10 @@
  * @module plugins/utils
  *
  * Shared utility functions for plugins.
- * Contains common file system operations and transformation helpers.
+ * Contains common file system operations, command execution, and transformation helpers.
  */
+
+import type { PluginPhaseResult } from "../types.ts";
 
 // =============================================================================
 // Types
@@ -297,3 +299,185 @@ export async function tryCopyFile(
 export function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// =============================================================================
+// Result Helpers
+// =============================================================================
+
+/**
+ * Create a successful plugin phase result.
+ */
+export function successResult(options?: {
+  durationMs?: number;
+  affectedFiles?: string[];
+  warnings?: string[];
+}): PluginPhaseResult {
+  return {
+    success: true,
+    durationMs: options?.durationMs,
+    affectedFiles: options?.affectedFiles?.length ? options.affectedFiles : undefined,
+    warnings: options?.warnings?.length ? options.warnings : undefined,
+  };
+}
+
+/**
+ * Create a failed plugin phase result.
+ */
+export function failureResult(error: string, durationMs?: number): PluginPhaseResult {
+  return {
+    success: false,
+    error,
+    durationMs,
+  };
+}
+
+/**
+ * Measure execution time and return a result creator.
+ */
+export function createTimer(): { elapsed: () => number } {
+  const startTime = Date.now();
+  return {
+    elapsed: () => Date.now() - startTime,
+  };
+}
+
+// =============================================================================
+// Command Execution
+// =============================================================================
+
+/**
+ * Result of command execution.
+ */
+export type CommandResult =
+  | { success: true; stdout: string; stderr: string }
+  | { success: false; error: string; code?: number; stderr?: string };
+
+/**
+ * Options for running a command.
+ */
+export interface RunCommandOptions {
+  /** Command to run (e.g., "deno", "bun", "npm") */
+  readonly command: string;
+  /** Command arguments */
+  readonly args: readonly string[];
+  /** Working directory */
+  readonly cwd?: string;
+  /** Whether to capture output for verbose logging */
+  readonly captureOutput?: boolean;
+}
+
+/**
+ * Run a command and return the result.
+ */
+export async function runCommand(options: RunCommandOptions): Promise<CommandResult> {
+  try {
+    const command = new Deno.Command(options.command, {
+      args: [...options.args],
+      cwd: options.cwd,
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const { code, stdout, stderr } = await command.output();
+    const decoder = new TextDecoder();
+    const stdoutText = decoder.decode(stdout);
+    const stderrText = decoder.decode(stderr);
+
+    if (code !== 0) {
+      return {
+        success: false,
+        error: `Command failed with exit code ${code}`,
+        code,
+        stderr: stderrText,
+      };
+    }
+
+    return {
+      success: true,
+      stdout: stdoutText,
+      stderr: stderrText,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to run command: ${String(error)}`,
+    };
+  }
+}
+
+/**
+ * Run a Deno script with full permissions.
+ */
+export function runDenoScript(
+  scriptPath: string,
+  cwd?: string,
+): Promise<CommandResult> {
+  return runCommand({
+    command: "deno",
+    args: ["run", "-A", scriptPath],
+    cwd,
+  });
+}
+
+// =============================================================================
+// File Transformation
+// =============================================================================
+
+/**
+ * Options for transforming files.
+ */
+export interface TransformFilesOptions {
+  /** Source directory */
+  readonly sourceDir: string;
+  /** Output directory */
+  readonly outputDir: string;
+  /** Files to transform (full paths) */
+  readonly files: readonly string[];
+  /** Transform function to apply to file content */
+  readonly transform: (content: string, filePath: string) => string;
+  /** Log function for debug output */
+  readonly log?: (message: string) => void;
+}
+
+/**
+ * Transform multiple files in parallel.
+ * Reads each file, applies the transform function, and writes to output.
+ *
+ * @returns Array of output file paths
+ */
+export function transformFiles(options: TransformFilesOptions): Promise<string[]> {
+  const { sourceDir, outputDir, files, transform, log } = options;
+
+  const processFile = async (file: string): Promise<string> => {
+    const relativePath = getRelativePath(file, sourceDir);
+    const outputPath = `${outputDir}/${relativePath}`;
+
+    // Ensure directory exists
+    const outputDirPath = getDirectory(outputPath);
+    if (outputDirPath) {
+      await ensureDirectory(outputDirPath);
+    }
+
+    // Read and transform content
+    const content = await Deno.readTextFile(file);
+    const transformed = transform(content, file);
+
+    // Write transformed content
+    await Deno.writeTextFile(outputPath, transformed);
+    log?.(`Transformed: ${relativePath}`);
+
+    return outputPath;
+  };
+
+  return Promise.all(files.map(processFile));
+}
+
+// =============================================================================
+// Default Files
+// =============================================================================
+
+/** Default files to copy to distributions */
+export const DEFAULT_COPY_FILES: readonly string[] = ["LICENSE", "README.md"];
+
+/** Default entry point for packages */
+export const DEFAULT_ENTRY_POINT = "mod.ts";
