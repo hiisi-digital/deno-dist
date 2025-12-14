@@ -11,14 +11,14 @@ import type { ResolvedPlugin } from "./plugins/mod.ts";
 import { resolvePlugins } from "./plugins/mod.ts";
 import { createVariablesFromContext } from "./template.ts";
 import type {
-    DistConfig,
-    DistributionConfig,
-    LogFunctions,
-    PipelineOptions,
-    PipelinePhase,
-    PipelineResult,
-    PluginContext,
-    PluginPhaseResult
+  DistConfig,
+  DistributionConfig,
+  LogFunctions,
+  PipelineOptions,
+  PipelinePhase,
+  PipelineResult,
+  PluginContext,
+  PluginPhaseResult,
 } from "./types.ts";
 import { PipelineError } from "./types.ts";
 
@@ -272,6 +272,7 @@ async function runPhase(
     };
 
     try {
+      // deno-lint-ignore no-await-in-loop
       const result = await handler.call(plugin, pluginContext);
 
       if (!result.success) {
@@ -334,6 +335,7 @@ export async function runPipelineAll(
   console.log(`Building ${distNames.length} distribution(s)...`);
 
   for (const distName of distNames) {
+    // deno-lint-ignore no-await-in-loop
     const result = await runPipeline(distName, config, options);
     results.set(distName, result);
   }

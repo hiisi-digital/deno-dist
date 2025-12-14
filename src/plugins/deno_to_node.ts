@@ -5,12 +5,7 @@
  * https://github.com/denoland/dnt
  */
 
-import type {
-    Plugin,
-    PluginContext,
-    PluginMetadata,
-    PluginPhaseResult,
-} from "../types.ts";
+import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
 
 // =============================================================================
 // Plugin Metadata
@@ -217,15 +212,24 @@ const denoToNodePlugin: Plugin = {
 
     // Copy additional files if specified
     if (options?.copyFiles) {
-      for (const file of options.copyFiles) {
+      const copyPromises = options.copyFiles.map(async (file) => {
+        const srcPath = `${context.sourceDir}/${file}`;
+        const destPath = `${context.outputDir}/${file}`;
         try {
-          const srcPath = `${context.sourceDir}/${file}`;
-          const destPath = `${context.outputDir}/${file}`;
           await Deno.copyFile(srcPath, destPath);
-          affectedFiles.push(destPath);
-          context.log.debug(`Copied: ${file}`);
+          return { file, destPath, success: true as const };
         } catch (error) {
-          context.log.warn(`Failed to copy ${file}: ${String(error)}`);
+          return { file, error: String(error), success: false as const };
+        }
+      });
+
+      const results = await Promise.all(copyPromises);
+      for (const result of results) {
+        if (result.success) {
+          affectedFiles.push(result.destPath);
+          context.log.debug(`Copied: ${result.file}`);
+        } else {
+          context.log.warn(`Failed to copy ${result.file}: ${result.error}`);
         }
       }
     }
@@ -358,5 +362,3 @@ try {
 
 export default denoToNodePlugin;
 export { denoToNodePlugin };
-export type { DenoToNodeOptions };
-

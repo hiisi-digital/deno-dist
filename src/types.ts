@@ -349,8 +349,8 @@ export interface WorkflowConfig {
  */
 export interface WorkflowTriggers {
   readonly push?: { branches?: readonly string[]; tags?: readonly string[] };
-  readonly pull_request?: { branches?: readonly string[] };
-  readonly workflow_dispatch?: Record<string, unknown>;
+  readonly "pull_request"?: { branches?: readonly string[] };
+  readonly "workflow_dispatch"?: Record<string, unknown>;
   readonly release?: { types?: readonly string[] };
 }
 

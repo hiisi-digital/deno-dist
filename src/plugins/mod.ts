@@ -6,13 +6,13 @@
  */
 
 import type {
-    DistributionConfig,
-    InlinePluginConfig,
-    Plugin,
-    PluginContext,
-    PluginMetadata,
-    PluginPhaseResult,
-    PluginReference,
+  DistributionConfig,
+  InlinePluginConfig,
+  Plugin,
+  PluginContext,
+  PluginMetadata,
+  PluginPhaseResult,
+  PluginReference,
 } from "../types.ts";
 import { PluginError } from "../types.ts";
 
@@ -194,8 +194,8 @@ export async function resolvePlugins(
 ): Promise<readonly ResolvedPlugin[]> {
   if (!references || references.length === 0) {
     // If no plugins specified but custom scripts exist, run them
-    const hasCustomScripts =
-      distConfig.preprocess || distConfig.transform || distConfig.postprocess;
+    const hasCustomScripts = distConfig.preprocess || distConfig.transform ||
+      distConfig.postprocess;
     if (hasCustomScripts) {
       return [
         {
@@ -208,28 +208,38 @@ export async function resolvePlugins(
     return [];
   }
 
-  const resolved: ResolvedPlugin[] = [];
+  // Normalize all references first
+  const normalized = references.map(normalizeReference);
 
-  for (const ref of references) {
-    const config = normalizeReference(ref);
+  // Separate @this from plugins that need loading
+  const pluginsToLoad = normalized.filter((c) => c.id !== "@this");
 
+  // Load all plugins in parallel
+  const loadedPlugins = await Promise.all(
+    pluginsToLoad.map((c) => loadPlugin(c.id)),
+  );
+
+  // Create a map for quick lookup
+  const pluginMap = new Map<string, Plugin>();
+  pluginsToLoad.forEach((c, i) => {
+    pluginMap.set(c.id, loadedPlugins[i]);
+  });
+
+  // Build resolved array maintaining order
+  const resolved: ResolvedPlugin[] = normalized.map((config) => {
     if (config.id === "@this") {
-      // Insert custom script placeholder
-      resolved.push({
+      return {
         plugin: createCustomScriptPlugin(distConfig),
         config,
         isThis: true,
-      });
-    } else {
-      // Load the plugin
-      const plugin = await loadPlugin(config.id);
-      resolved.push({
-        plugin,
-        config,
-        isThis: false,
-      });
+      };
     }
-  }
+    return {
+      plugin: pluginMap.get(config.id)!,
+      config,
+      isThis: false,
+    };
+  });
 
   return resolved;
 }
@@ -258,21 +268,21 @@ function createCustomScriptPlugin(distConfig: DistributionConfig): Plugin {
 
   return {
     metadata,
-    async preprocess(context: PluginContext): Promise<PluginPhaseResult> {
+    preprocess(context: PluginContext): Promise<PluginPhaseResult> {
       if (!distConfig.preprocess) {
-        return { success: true };
+        return Promise.resolve({ success: true });
       }
       return runCustomScript(distConfig.preprocess, "preprocess", context);
     },
-    async transform(context: PluginContext): Promise<PluginPhaseResult> {
+    transform(context: PluginContext): Promise<PluginPhaseResult> {
       if (!distConfig.transform) {
-        return { success: true };
+        return Promise.resolve({ success: true });
       }
       return runCustomScript(distConfig.transform, "transform", context);
     },
-    async postprocess(context: PluginContext): Promise<PluginPhaseResult> {
+    postprocess(context: PluginContext): Promise<PluginPhaseResult> {
       if (!distConfig.postprocess) {
-        return { success: true };
+        return Promise.resolve({ success: true });
       }
       return runCustomScript(distConfig.postprocess, "postprocess", context);
     },
@@ -328,4 +338,3 @@ async function runCustomScript(
 // =============================================================================
 
 export type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult };
-

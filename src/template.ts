@@ -14,11 +14,7 @@
  * - Range replacement: <!-- --dist-template: <name> @start --> ... <!-- --dist-template: <name> @end -->
  */
 
-import type {
-    TemplateInsertionMode,
-    TemplateMarker,
-    TemplateVariables,
-} from "./types.ts";
+import type { TemplateInsertionMode, TemplateMarker, TemplateVariables } from "./types.ts";
 import { TemplateError } from "./types.ts";
 
 // =============================================================================
@@ -52,16 +48,13 @@ export interface ParsedVariable {
 const VARIABLE_PATTERN = /@\{([^}]+)\}/g;
 
 /** Pattern for single insertion markers: <!-- --dist-template: name --> */
-const SINGLE_MARKER_PATTERN =
-  /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s*-->/g;
+const SINGLE_MARKER_PATTERN = /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s*-->/g;
 
 /** Pattern for range start markers: <!-- --dist-template: name @start --> */
-const RANGE_START_PATTERN =
-  /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s+@start\s*-->/g;
+const RANGE_START_PATTERN = /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s+@start\s*-->/g;
 
 /** Pattern for range end markers: <!-- --dist-template: name @end --> */
-const RANGE_END_PATTERN =
-  /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s+@end\s*-->/g;
+const RANGE_END_PATTERN = /<!--\s*--dist-template:\s*([a-zA-Z0-9_-]+)\s+@end\s*-->/g;
 
 // =============================================================================
 // Variable Creation
@@ -481,8 +474,7 @@ export function processTemplate(
 
     if (marker.mode === "single") {
       // Single insertion: replace the marker with template content
-      result =
-        result.slice(0, marker.startIndex) +
+      result = result.slice(0, marker.startIndex) +
         templateContent +
         result.slice(marker.endIndex);
     } else {
@@ -499,8 +491,7 @@ export function processTemplate(
         const startMarkerEnd = marker.startIndex + startMarkerMatch[0].length;
         const endMarkerStart = marker.endIndex! - endMarkerMatch[0].length;
 
-        result =
-          result.slice(0, startMarkerEnd) +
+        result = result.slice(0, startMarkerEnd) +
           "\n" +
           templateContent +
           "\n" +

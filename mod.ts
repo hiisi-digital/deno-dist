@@ -45,54 +45,44 @@
 // =============================================================================
 
 export type {
-    CliArgs,
-    CliCommand,
-    DistConfig,
-    DistributionConfig,
-    InlinePluginConfig,
-    LogFunctions,
-    PipelineOptions,
-    PipelinePhase,
-    PipelineResult,
-    Plugin,
-    PluginConfig,
-    PluginContext,
-    PluginMetadata,
-    PluginPhaseResult,
-    PluginReference,
-    PostprocessPlugin,
-    PreprocessPlugin,
-    PublishConfig,
-    RuntimeId,
-    RuntimeVersion,
-    TemplateInsertionMode,
-    TemplateMarker,
-    TemplateVariables,
-    TestConfig,
-    TransformPlugin,
-    WorkflowConfig,
-    WorkflowJob,
-    WorkflowStep,
-    WorkflowTriggers
+  CliArgs,
+  CliCommand,
+  DistConfig,
+  DistributionConfig,
+  InlinePluginConfig,
+  LogFunctions,
+  PipelineOptions,
+  PipelinePhase,
+  PipelineResult,
+  Plugin,
+  PluginConfig,
+  PluginContext,
+  PluginMetadata,
+  PluginPhaseResult,
+  PluginReference,
+  PostprocessPlugin,
+  PreprocessPlugin,
+  PublishConfig,
+  RuntimeId,
+  RuntimeVersion,
+  TemplateInsertionMode,
+  TemplateMarker,
+  TemplateVariables,
+  TestConfig,
+  TransformPlugin,
+  WorkflowConfig,
+  WorkflowJob,
+  WorkflowStep,
+  WorkflowTriggers,
 } from "./src/types.ts";
 
-export {
-    ConfigError,
-    DistError,
-    PipelineError,
-    PluginError,
-    TemplateError
-} from "./src/types.ts";
+export { ConfigError, DistError, PipelineError, PluginError, TemplateError } from "./src/types.ts";
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
-export {
-    loadDistConfig,
-    parseDistConfig,
-    validateConfig
-} from "./src/config.ts";
+export { loadDistConfig, parseDistConfig, validateConfig } from "./src/config.ts";
 
 export type { ConfigValidationResult } from "./src/config.ts";
 
@@ -101,11 +91,11 @@ export type { ConfigValidationResult } from "./src/config.ts";
 // =============================================================================
 
 export {
-    createVariables,
-    findTemplateMarkers,
-    parseVariable,
-    processTemplate,
-    resolveVariable
+  createVariables,
+  findTemplateMarkers,
+  parseVariable,
+  processTemplate,
+  resolveVariable,
 } from "./src/template.ts";
 
 export type { ParsedVariable, VariableType } from "./src/template.ts";

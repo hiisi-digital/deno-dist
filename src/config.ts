@@ -6,12 +6,12 @@
 
 import { parse as parseJsonc } from "@std/jsonc";
 import type {
-    DistConfig,
-    DistributionConfig,
-    PluginReference,
-    PublishConfig,
-    RuntimeId,
-    TestConfig,
+  DistConfig,
+  DistributionConfig,
+  PluginReference,
+  PublishConfig,
+  RuntimeId,
+  TestConfig,
 } from "./types.ts";
 import { ConfigError } from "./types.ts";
 
@@ -261,9 +261,7 @@ function parseTestConfig(value: unknown): TestConfig | undefined {
   const raw = value as Record<string, unknown>;
   return {
     command: parseOptionalString(raw.command),
-    setup: raw.setup && Array.isArray(raw.setup)
-      ? raw.setup.map((s) => String(s))
-      : undefined,
+    setup: raw.setup && Array.isArray(raw.setup) ? raw.setup.map((s) => String(s)) : undefined,
     timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
     env: parseStringRecord(raw.env),
   };

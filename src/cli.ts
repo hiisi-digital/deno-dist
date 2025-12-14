@@ -272,18 +272,14 @@ const updateWorkflowsCommand: CliCommand = {
       // Directory may already exist
     }
 
-    let generated = 0;
+    // Collect all workflow write operations
+    const writeOperations: Array<{ path: string; content: string }> = [];
 
     for (const [distName, distConfig] of Object.entries(config.distributions)) {
       // Generate test workflow
       const testWorkflow = generateTestWorkflow(distName, distConfig.runtime, distConfig.versions);
       const testWorkflowPath = `${workflowsDir}/test-${distName}.yml`;
-      await Deno.writeTextFile(testWorkflowPath, testWorkflow);
-      if (verbose) {
-        // deno-lint-ignore no-console
-        console.log(`  Generated: ${testWorkflowPath}`);
-      }
-      generated++;
+      writeOperations.push({ path: testWorkflowPath, content: testWorkflow });
 
       // Generate publish workflow if publish config exists
       if (distConfig.publish) {
@@ -293,14 +289,23 @@ const updateWorkflowsCommand: CliCommand = {
           distConfig.publish,
         );
         const publishWorkflowPath = `${workflowsDir}/publish-${distName}.yml`;
-        await Deno.writeTextFile(publishWorkflowPath, publishWorkflow);
-        if (verbose) {
-          // deno-lint-ignore no-console
-          console.log(`  Generated: ${publishWorkflowPath}`);
-        }
-        generated++;
+        writeOperations.push({ path: publishWorkflowPath, content: publishWorkflow });
       }
     }
+
+    // Write all workflows in parallel
+    await Promise.all(
+      writeOperations.map((op) => Deno.writeTextFile(op.path, op.content)),
+    );
+
+    if (verbose) {
+      for (const op of writeOperations) {
+        // deno-lint-ignore no-console
+        console.log(`  Generated: ${op.path}`);
+      }
+    }
+
+    const generated = writeOperations.length;
 
     // deno-lint-ignore no-console
     console.log(`\n\u2713 Generated ${generated} workflow(s)`);
@@ -560,11 +565,11 @@ async function main(): Promise<number> {
 
   // Handle global flags
   if (args.flags.help) {
-    return helpCommand.handler(args);
+    return await helpCommand.handler(args);
   }
 
   if (args.flags.version) {
-    return versionCommand.handler(args);
+    return await versionCommand.handler(args);
   }
 
   // Find and run command
@@ -577,7 +582,7 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  return command.handler(args);
+  return await command.handler(args);
 }
 
 // Run CLI

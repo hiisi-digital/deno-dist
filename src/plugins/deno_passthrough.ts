@@ -5,12 +5,7 @@
  * Useful for creating Deno-specific distributions or as a base for other plugins.
  */
 
-import type {
-    Plugin,
-    PluginContext,
-    PluginMetadata,
-    PluginPhaseResult,
-} from "../types.ts";
+import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
 
 // =============================================================================
 // Plugin Metadata
@@ -125,7 +120,8 @@ const denoPassthroughPlugin: Plugin = {
       copyAssets,
     });
 
-    for (const file of files) {
+    // Process all files in parallel
+    const processFile = async (file: string): Promise<string> => {
       const relativePath = file.slice(context.sourceDir.length + 1);
       const outputPath = `${context.outputDir}/${relativePath}`;
 
@@ -156,9 +152,12 @@ const denoPassthroughPlugin: Plugin = {
         await Deno.copyFile(file, outputPath);
       }
 
-      affectedFiles.push(outputPath);
       context.log.debug(`Copied: ${relativePath}`);
-    }
+      return outputPath;
+    };
+
+    const processedFiles = await Promise.all(files.map(processFile));
+    affectedFiles.push(...processedFiles);
 
     // Copy deno.json if requested
     if (options?.copyDenoJson !== false) {
@@ -184,15 +183,22 @@ const denoPassthroughPlugin: Plugin = {
 
     // Copy additional files if specified
     const filesToCopy = options?.copyFiles ?? ["LICENSE", "README.md"];
-    for (const file of filesToCopy) {
+    const copyPromises = filesToCopy.map(async (file) => {
+      const srcPath = `${context.sourceDir}/${file}`;
+      const destPath = `${context.outputDir}/${file}`;
       try {
-        const srcPath = `${context.sourceDir}/${file}`;
-        const destPath = `${context.outputDir}/${file}`;
         await Deno.copyFile(srcPath, destPath);
-        affectedFiles.push(destPath);
-        context.log.debug(`Copied: ${file}`);
+        return { file, destPath, success: true as const };
       } catch {
-        // Ignore missing files
+        return { file, success: false as const };
+      }
+    });
+
+    const copyResults = await Promise.all(copyPromises);
+    for (const result of copyResults) {
+      if (result.success) {
+        affectedFiles.push(result.destPath);
+        context.log.debug(`Copied: ${result.file}`);
       }
     }
 
@@ -414,5 +420,3 @@ function stripTypeScriptComments(content: string): string {
 
 export default denoPassthroughPlugin;
 export { denoPassthroughPlugin };
-export type { DenoPassthroughOptions };
-
