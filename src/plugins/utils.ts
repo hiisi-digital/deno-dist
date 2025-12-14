@@ -2,10 +2,11 @@
  * @module plugins/utils
  *
  * Shared utility functions for plugins.
- * Contains common file system operations, command execution, and transformation helpers.
+ * Contains common file system operations, command execution, transformation helpers,
+ * and plugin option validation utilities.
  */
 
-import type { PluginPhaseResult } from "../types.ts";
+import type { PluginContext, PluginPhaseResult } from "../types.ts";
 
 // =============================================================================
 // Types
@@ -298,6 +299,166 @@ export async function tryCopyFile(
  */
 export function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// =============================================================================
+// Plugin Option Validation
+// =============================================================================
+
+/**
+ * Validation error with field path.
+ */
+export interface ValidationError {
+  readonly field: string;
+  readonly message: string;
+}
+
+/**
+ * Result of option validation.
+ */
+export interface ValidationResult {
+  readonly valid: boolean;
+  readonly errors: readonly ValidationError[];
+}
+
+/**
+ * Validate that required fields are present.
+ */
+export function validateRequired(
+  options: Record<string, unknown>,
+  fields: readonly string[],
+): ValidationResult {
+  const errors: ValidationError[] = [];
+
+  for (const field of fields) {
+    if (options[field] === undefined || options[field] === null) {
+      errors.push({ field, message: `${field} is required` });
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate that a field is a string.
+ */
+export function validateString(
+  value: unknown,
+  field: string,
+): ValidationError | null {
+  if (value !== undefined && typeof value !== "string") {
+    return { field, message: `${field} must be a string` };
+  }
+  return null;
+}
+
+/**
+ * Validate that a field is a boolean.
+ */
+export function validateBoolean(
+  value: unknown,
+  field: string,
+): ValidationError | null {
+  if (value !== undefined && typeof value !== "boolean") {
+    return { field, message: `${field} must be a boolean` };
+  }
+  return null;
+}
+
+/**
+ * Validate that a field is an array.
+ */
+export function validateArray(
+  value: unknown,
+  field: string,
+): ValidationError | null {
+  if (value !== undefined && !Array.isArray(value)) {
+    return { field, message: `${field} must be an array` };
+  }
+  return null;
+}
+
+/**
+ * Validate that a field is one of the allowed values.
+ */
+export function validateOneOf<T>(
+  value: T,
+  field: string,
+  allowed: readonly T[],
+): ValidationError | null {
+  if (value !== undefined && !allowed.includes(value)) {
+    return { field, message: `${field} must be one of: ${allowed.join(", ")}` };
+  }
+  return null;
+}
+
+/**
+ * Validate that a file exists.
+ */
+export async function validateFileExists(
+  path: string,
+  field: string,
+): Promise<ValidationError | null> {
+  try {
+    const stat = await Deno.stat(path);
+    if (!stat.isFile) {
+      return { field, message: `${field} must be a file, not a directory` };
+    }
+    return null;
+  } catch {
+    return { field, message: `${field} file not found: ${path}` };
+  }
+}
+
+/**
+ * Validate that a directory exists.
+ */
+export async function validateDirectoryExists(
+  path: string,
+  field: string,
+): Promise<ValidationError | null> {
+  try {
+    const stat = await Deno.stat(path);
+    if (!stat.isDirectory) {
+      return { field, message: `${field} must be a directory, not a file` };
+    }
+    return null;
+  } catch {
+    return { field, message: `${field} directory not found: ${path}` };
+  }
+}
+
+// =============================================================================
+// Plugin Context Helpers
+// =============================================================================
+
+/**
+ * Get a typed option value from the plugin context.
+ */
+export function getOption<T>(
+  context: PluginContext,
+  key: string,
+  defaultValue: T,
+): T {
+  const options = context.pluginConfig.options as Record<string, unknown> | undefined;
+  const value = options?.[key];
+  return value !== undefined ? (value as T) : defaultValue;
+}
+
+/**
+ * Get the package name from context, falling back to defaults.
+ */
+export function getPackageName(context: PluginContext): string {
+  const configName = context.variables.config["name"];
+  return typeof configName === "string" && configName.length > 0 ? configName : "package";
+}
+
+/**
+ * Get the package version from context, falling back to defaults.
+ */
+export function getPackageVersion(context: PluginContext): string {
+  const configVersion = context.variables.config["version"];
+  return typeof configVersion === "string" && configVersion.length > 0 ? configVersion : "0.0.0";
 }
 
 // =============================================================================

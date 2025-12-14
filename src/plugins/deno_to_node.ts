@@ -12,6 +12,8 @@ import {
   DEFAULT_ENTRY_POINT,
   ensureDirectory,
   failureResult,
+  getPackageName,
+  getPackageVersion,
   runDenoScript,
   successResult,
   tryCopyFile,
@@ -147,8 +149,8 @@ const denoToNodePlugin: Plugin = {
     const entryPoint = options?.entryPoint ?? DEFAULT_ENTRY_POINT;
 
     // Resolve package name and version from options or config
-    const packageName = resolvePackageName(options, context);
-    const packageVersion = resolvePackageVersion(options, context);
+    const packageName = options?.packageName ?? getPackageName(context);
+    const packageVersion = options?.packageVersion ?? getPackageVersion(context);
 
     // Build the dnt script
     const buildScript = generateBuildScript({
@@ -244,40 +246,6 @@ const denoToNodePlugin: Plugin = {
 // =============================================================================
 // Helper Functions
 // =============================================================================
-
-/**
- * Resolve the package name from options or context.
- */
-function resolvePackageName(
-  options: DenoToNodeOptions | undefined,
-  context: PluginContext,
-): string {
-  if (options?.packageName) {
-    return options.packageName;
-  }
-  const configName = context.variables.config["name"];
-  if (typeof configName === "string" && configName.length > 0) {
-    return configName;
-  }
-  return "package";
-}
-
-/**
- * Resolve the package version from options or context.
- */
-function resolvePackageVersion(
-  options: DenoToNodeOptions | undefined,
-  context: PluginContext,
-): string {
-  if (options?.packageVersion) {
-    return options.packageVersion;
-  }
-  const configVersion = context.variables.config["version"];
-  if (typeof configVersion === "string" && configVersion.length > 0) {
-    return configVersion;
-  }
-  return "0.0.0";
-}
 
 /**
  * Clean up the temporary build script.

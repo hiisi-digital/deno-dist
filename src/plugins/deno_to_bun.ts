@@ -15,6 +15,8 @@ import {
   ensureDirectory,
   escapeRegex,
   failureResult,
+  getPackageName,
+  getPackageVersion,
   runCommand,
   successResult,
   transformFiles,
@@ -336,8 +338,8 @@ function generatePackageJson(
   context: PluginContext,
   options: DenoToBunOptions | undefined,
 ): Record<string, unknown> {
-  const name = (context.variables.config["name"] as string | undefined) ?? "package";
-  const version = (context.variables.config["version"] as string | undefined) ?? "0.0.0";
+  const name = getPackageName(context);
+  const version = getPackageVersion(context);
   const entryPoint = options?.entryPoint ?? DEFAULT_ENTRY_POINT;
 
   const jsEntry = entryPoint.replace(/\.ts$/, ".js");
