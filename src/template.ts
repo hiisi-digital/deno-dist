@@ -356,13 +356,11 @@ export function escapeRegex(text: string): string {
 export function findTemplateMarkers(content: string): readonly TemplateMarker[] {
   const markers: TemplateMarker[] = [];
   const rangeMarkers = findRangeMarkers(content);
-  const rangeNames = new Set(rangeMarkers.map((m) => m.name));
-
   // Add range markers
   markers.push(...rangeMarkers);
 
   // Find single insertion markers (that are not part of ranges)
-  findSingleMarkers(content, markers, rangeNames);
+  findSingleMarkers(content, markers);
 
   // Sort by start index
   markers.sort((a, b) => a.startIndex - b.startIndex);
@@ -415,7 +413,6 @@ function findRangeMarkers(content: string): TemplateMarker[] {
 function findSingleMarkers(
   content: string,
   markers: TemplateMarker[],
-  _rangeNames: Set<string>,
 ): void {
   SINGLE_MARKER_PATTERN.lastIndex = 0;
 
