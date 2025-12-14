@@ -282,7 +282,7 @@ if (result.success) {
 ## CLI Reference
 
 ```
-deno-dist v0.2.0
+deno-dist v0.2.1
 
 USAGE:
   deno-dist <command> [options]
