@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags-ignore:
+      - "**"
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # =============================================================================
+  # Deno Tests
+  # =============================================================================
+  test:
+    name: Test (Deno ${{ matrix.deno-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        deno-version: ["v2.x"]
+        include:
+          - deno-version: "v2.x"
+            is-primary: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ matrix.deno-version }}
+
+      - name: Verify formatting
+        if: matrix.is-primary
+        run: deno fmt --check
+
+      - name: Run linter
+        if: matrix.is-primary
+        run: deno lint
+
+      - name: Type check
+        run: deno check mod.ts
+
+      - name: Run tests
+        run: deno test --allow-read --allow-write --allow-env --allow-run --allow-net
+
+  # =============================================================================
+  # Publish Dry Run
+  # =============================================================================
+  publish-dry-run:
+    name: JSR publish (dry-run)
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Publish to JSR (dry-run)
+        run: deno publish --dry-run --allow-dirty
