@@ -1,0 +1,30 @@
+#!/bin/sh
+#----------------------------------------------------------------------------------------------------
+# Pre-push hook - runs format, lint, and type checks before pushing
+#----------------------------------------------------------------------------------------------------
+
+echo "Running Deno format check..."
+if ! deno fmt --check; then
+  echo "Format check failed. Run 'deno fmt' to fix."
+  exit 1
+fi
+
+echo "Running Deno lint..."
+if ! deno lint; then
+  echo "Lint check failed."
+  exit 1
+fi
+
+echo "Running Deno type check..."
+if ! deno check mod.ts; then
+  echo "Type check failed."
+  exit 1
+fi
+
+echo "Running tests..."
+if ! deno test --allow-read --allow-write --allow-env --allow-run; then
+  echo "Tests failed."
+  exit 1
+fi
+
+echo "All checks passed!"

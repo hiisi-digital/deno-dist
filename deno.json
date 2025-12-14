@@ -1,0 +1,90 @@
+{
+  "name": "@hiisi/deno-dist",
+  "version": "0.1.0",
+  "license": "MPL-2.0",
+
+  "exports": {
+    ".": "./mod.ts",
+    "./cli": "./src/cli.ts",
+    "./types": "./src/types.ts",
+    "./plugins": "./src/plugins/mod.ts"
+  },
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.0",
+    "@std/path": "jsr:@std/path@^1.0.0",
+    "@std/fs": "jsr:@std/fs@^1.0.0",
+    "@std/testing": "jsr:@std/testing@^1.0.0",
+    "@std/cli": "jsr:@std/cli@^1.0.0",
+    "@std/jsonc": "jsr:@std/jsonc@^1.0.0"
+  },
+  "lint": {
+    "include": [
+      "**/*.ts"
+    ],
+    "rules": {
+      "tags": [
+        "recommended"
+      ],
+      "include": [
+        "camelcase",
+        "default-param-last",
+        "eqeqeq",
+        "explicit-function-return-type",
+        "explicit-module-boundary-types",
+        "no-await-in-loop",
+        "no-console",
+        "no-const-assign",
+        "no-eval",
+        "no-implicit-declare-namespace-export",
+        "no-non-null-asserted-optional-chain",
+        "no-self-compare",
+        "no-sparse-arrays",
+        "no-sync-fn-in-async-fn",
+        "no-throw-literal",
+        "prefer-ascii",
+        "single-var-declarator",
+        "verbatim-module-syntax"
+      ],
+      "exclude": [
+        "no-console"
+      ]
+    }
+  },
+  "fmt": {
+    "useTabs": false,
+    "lineWidth": 100,
+    "indentWidth": 2,
+    "semiColons": true,
+    "singleQuote": false,
+    "proseWrap": "preserve",
+    "include": [
+      "**/*.ts",
+      "*.md"
+    ]
+  },
+  "tasks": {
+    "test": "deno test --allow-read --allow-write --allow-env --allow-run --allow-net",
+    "test:watch": "deno test --allow-read --allow-write --allow-env --allow-run --allow-net --watch",
+    "lint": "deno lint",
+    "lint:fix": "deno lint --fix",
+    "fmt": "deno fmt",
+    "fmt:check": "deno fmt --check",
+    "check": "deno check mod.ts",
+    "all": "deno task fmt && deno task lint && deno task check && deno task test",
+    "prepublish": "deno task all",
+    "dist": "deno run --allow-read --allow-write --allow-env --allow-run src/cli.ts"
+  },
+  "publish": {
+    "include": [
+      "mod.ts",
+      "src/**/*.ts",
+      "README.md",
+      "LICENSE"
+    ],
+    "exclude": [
+      "tests/",
+      "scripts/",
+      ".githooks/"
+    ]
+  }
+}

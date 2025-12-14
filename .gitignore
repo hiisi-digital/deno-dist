@@ -1,0 +1,32 @@
+# OS files
+.DS_Store
+
+# Distribution output directory
+target
+
+# Coverage
+cov_profile
+coverage
+
+# Built npm packages (ephemeral)
+npm
+npm-test
+
+# Temporary import maps created during build
+npm_import_map.json
+npm_import_map_test.json
+
+# Node.js artifacts (created during local testing)
+node_modules
+package.json
+package-lock.json
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local
+
+# Deno cache
+.deno
