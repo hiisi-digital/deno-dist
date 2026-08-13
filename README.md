@@ -154,8 +154,7 @@ deno-dist validate
     "command": "npm test",
     "setup": ["npm install"],
     "timeout": 30000,
-    "env": { "NODE_ENV": "test" },
-    "enabled": true
+    "env": { "NODE_ENV": "test" }
   }
 }
 ```
@@ -165,13 +164,14 @@ deno-dist validate
 ```json
 {
   "publish": {
-    "registries": ["npm", "github-release"],
+    "registry": "npm",
     "provenance": true,
-    "access": "public",
-    "dryRun": false
+    "access": "public"
   }
 }
 ```
+
+Supported fields: `registry` (target registry; generated release workflows default to `jsr` for Deno and `npm` otherwise), `provenance` (provenance attestation), `access` (`"public"` or `"restricted"`), and `command` (custom publish command).
 
 ### Metadata configuration
 
@@ -413,7 +413,6 @@ await runRelease(config, {
 });
 
 // Visualize the execution graph
-import { buildExecutionGraph, visualizeGraph } from "@hiisi/deno-dist";
 const graph = buildExecutionGraph(plugins, { distributions: ["node", "bun"] });
 console.log(visualizeGraph(graph));
 ```
