@@ -159,6 +159,8 @@ deno-dist validate
 }
 ```
 
+The distribution schema also defines `enabled` for this block, gating tests for the distribution. The config parser does not read it yet, so setting it has no effect.
+
 ### Publish configuration
 
 ```json
@@ -171,7 +173,9 @@ deno-dist validate
 }
 ```
 
-Supported fields: `registry` (target registry; generated release workflows default to `jsr` for Deno and `npm` otherwise), `provenance` (provenance attestation), `access` (`"public"` or `"restricted"`), and `command` (custom publish command).
+Fields the config parser reads: `registry` (target registry), `provenance` (provenance attestation), `access` (`"public"` or `"restricted"`), and `command` (custom publish command). When `registry` is unset, generated release workflows fall back to `jsr` for a Deno runtime and `npm` otherwise.
+
+The schema additionally defines `registries`, a list intended to supersede `registry` (which the schema marks deprecated), and `dryRun`. Neither is read by the config parser yet, so setting either has no effect.
 
 ### Metadata configuration
 
