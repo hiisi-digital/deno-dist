@@ -1,9 +1,8 @@
 {
   "name": "@hiisi/deno-dist",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Build distributions of your Deno project for multiple runtimes from a single codebase.",
   "license": "MPL-2.0",
-
   "exports": {
     ".": "./mod.ts",
     "./cli": "./src/cli.ts",
@@ -70,7 +69,7 @@
     "lint:fix": "deno lint --fix",
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",
-    "check": "deno check mod.ts",
+    "check": "deno check mod.ts src/cli.ts src/types.ts src/plugins/mod.ts",
     "codegen": "deno run -A scripts/codegen.ts",
     "all": "deno task fmt && deno task lint && deno task check && deno task test",
     "prepublish": "deno task codegen && deno task all",
@@ -90,13 +89,16 @@
       ".githooks/"
     ]
   },
-
   "distDir": "target",
   "dist": {
     "deno": {
       "runtime": "deno",
-      "versions": ["v2.x"],
-      "plugins": ["deno-passthrough"],
+      "versions": [
+        "v2.x"
+      ],
+      "plugins": [
+        "deno-passthrough"
+      ],
       "publish": {
         "registry": "jsr",
         "provenance": true

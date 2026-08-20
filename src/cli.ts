@@ -237,7 +237,7 @@ function getTargetDistributions(
   args: CliArgs,
   config: DistConfig,
 ): readonly string[] | null {
-  const buildAll = args.flags.all as boolean;
+  const buildAll = args.flags.all;
 
   if (buildAll) {
     return Object.keys(config.distributions);
@@ -264,10 +264,10 @@ function getTargetDistributions(
  */
 function createPipelineOptions(args: CliArgs): PipelineOptions {
   return {
-    verbose: args.flags.verbose as boolean,
-    clean: args.flags.clean as boolean,
+    verbose: args.flags.verbose,
+    clean: args.flags.clean,
     scope: args.scope,
-    dryRun: args.flags.dryRun as boolean,
+    dryRun: args.flags.dryRun,
   };
 }
 
@@ -277,7 +277,7 @@ function createPipelineOptions(args: CliArgs): PipelineOptions {
 function createExtendedPipelineOptions(args: CliArgs): ExtendedPipelineOptions {
   return {
     ...createPipelineOptions(args),
-    tag: args.flags.tag as string | undefined,
+    tag: args.flags.tag,
   };
 }
 
@@ -294,8 +294,8 @@ const buildCommand: CliCommand = {
   aliases: ["b"],
 
   async handler(args: CliArgs): Promise<number> {
-    const configPath = args.flags.config as string;
-    const buildAll = args.flags.all as boolean;
+    const configPath = args.flags.config;
+    const buildAll = args.flags.all;
 
     const configResult = await loadAndValidateConfig(configPath);
     if (!configResult.success) {
@@ -338,7 +338,7 @@ const setupCommand: CliCommand = {
   aliases: ["s", "init"],
 
   async handler(args: CliArgs): Promise<number> {
-    const configPath = args.flags.config as string;
+    const configPath = args.flags.config;
 
     const configResult = await loadAndValidateConfig(configPath);
     if (!configResult.success) {
@@ -376,7 +376,7 @@ const releaseCommand: CliCommand = {
   aliases: ["r", "publish"],
 
   async handler(args: CliArgs): Promise<number> {
-    const configPath = args.flags.config as string;
+    const configPath = args.flags.config;
 
     const configResult = await loadAndValidateConfig(configPath);
     if (!configResult.success) {
@@ -393,7 +393,7 @@ const releaseCommand: CliCommand = {
 
     // Load release notes if specified
     let releaseNotes: string | undefined;
-    const notesPath = args.flags.notes as string | undefined;
+    const notesPath = args.flags.notes;
     if (notesPath) {
       try {
         releaseNotes = await Deno.readTextFile(notesPath);
@@ -431,7 +431,7 @@ const graphCommand: CliCommand = {
   aliases: ["g", "parallel"],
 
   async handler(args: CliArgs): Promise<number> {
-    const configPath = args.flags.config as string;
+    const configPath = args.flags.config;
 
     const configResult = await loadAndValidateConfig(configPath);
     if (!configResult.success) {
@@ -464,7 +464,7 @@ const validateCommand: CliCommand = {
   aliases: ["v", "check"],
 
   async handler(args: CliArgs): Promise<number> {
-    const configPath = args.flags.config as string;
+    const configPath = args.flags.config;
 
     logger.log(`Validating configuration: ${configPath}`);
 
