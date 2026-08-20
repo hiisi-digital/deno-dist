@@ -32,15 +32,20 @@ deno-dist build node
 
 # Or run directly without installing
 deno run -A jsr:@hiisi/deno-dist/cli build node
+```
 
-# Or add to your deno.json tasks
+Or add a task to your `deno.json`, which is JSON rather than shell and so does not belong in the
+block above:
+
+```json
 {
   "tasks": {
     "dist": "deno run -A jsr:@hiisi/deno-dist/cli"
   }
 }
+```
 
-# Then run as
+```bash
 deno task dist build node
 ```
 
