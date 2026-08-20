@@ -154,24 +154,28 @@ deno-dist validate
     "command": "npm test",
     "setup": ["npm install"],
     "timeout": 30000,
-    "env": { "NODE_ENV": "test" },
-    "enabled": true
+    "env": { "NODE_ENV": "test" }
   }
 }
 ```
+
+The distribution schema also defines `enabled` for this block, gating tests for the distribution. The config parser does not read it yet, so setting it has no effect.
 
 ### Publish configuration
 
 ```json
 {
   "publish": {
-    "registries": ["npm", "github-release"],
+    "registry": "npm",
     "provenance": true,
-    "access": "public",
-    "dryRun": false
+    "access": "public"
   }
 }
 ```
+
+Fields the config parser reads: `registry` (target registry), `provenance` (provenance attestation), `access` (`"public"` or `"restricted"`), and `command` (custom publish command). When `registry` is unset, generated release workflows fall back to `jsr` for a Deno runtime and `npm` otherwise.
+
+The schema additionally defines `registries`, a list intended to supersede `registry` (which the schema marks deprecated), and `dryRun`. Neither is read by the config parser yet, so setting either has no effect.
 
 ### Metadata configuration
 
@@ -413,7 +417,6 @@ await runRelease(config, {
 });
 
 // Visualize the execution graph
-import { buildExecutionGraph, visualizeGraph } from "@hiisi/deno-dist";
 const graph = buildExecutionGraph(plugins, { distributions: ["node", "bun"] });
 console.log(visualizeGraph(graph));
 ```
