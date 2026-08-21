@@ -15,4 +15,4 @@
  */
 
 /** The package version, kept equal to `deno.json` by `tests/version_test.ts`. */
-export const VERSION = "0.3.1";
+export const VERSION = "0.4.0";
