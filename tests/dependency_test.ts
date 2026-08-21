@@ -58,7 +58,7 @@ Deno.test("an already-mapped specifier gets no dependency", () => {
   // that does not exist on npm at all.
   const derived = deriveDependencies(
     { "@std/path": "jsr:@std/path@^1.0.0", "@hiisi/onlywhen": "jsr:@hiisi/onlywhen@^0.5.0" },
-    new Set(["@std/path"]),
+    { alreadyMapped: new Set(["@std/path"]) },
   );
   assertEquals(Object.keys(derived.dependencies), ["@jsr/hiisi__onlywhen"]);
   assertEquals(derived.mappings["@std/path"], undefined);
@@ -209,7 +209,7 @@ Deno.test("only specifiers the shipped files import become dependencies", () => 
   const used = new Set(["@hiisi/onlywhen"]);
 
   assertEquals(
-    Object.keys(deriveDependencies(imports, new Set(), used).dependencies),
+    Object.keys(deriveDependencies(imports, { used }).dependencies),
     ["@jsr/hiisi__onlywhen"],
   );
   // The control: with no `used` set the old behaviour is what happens, so the test above is

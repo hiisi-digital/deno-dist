@@ -191,11 +191,10 @@ const denoToBunPlugin: Plugin = {
     const sources = await Promise.all(
       files.map((file) => Deno.readTextFile(file).catch(() => "")),
     );
-    const derived = deriveDependencies(
-      configImports,
-      new Set(Object.keys(explicit)),
-      importedSpecifiers(sources),
-    );
+    const derived = deriveDependencies(configImports, {
+      alreadyMapped: new Set(Object.keys(explicit)),
+      used: importedSpecifiers(sources),
+    });
     const mappings = { ...explicit, ...derived.mappings };
 
     // Transform all files using the shared utility

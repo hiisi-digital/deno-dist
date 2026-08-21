@@ -686,6 +686,24 @@ export const DEFAULT_ENTRY_POINT = "mod.ts";
 /** The npm registry that serves jsr packages, and where a `@jsr/` scope resolves. */
 export const JSR_NPM_REGISTRY = "https://npm.jsr.io";
 
+/** How {@link deriveDependencies} narrows an import map. */
+export interface DeriveOptions {
+  /**
+   * Specifiers something else has already rewritten, usually to a built-in.
+   *
+   * Skipped, because a dependency declared for a specifier nothing imports any more is an
+   * install of something unused, and for one rewritten to `bun:test` it is an install of
+   * something that does not exist.
+   */
+  readonly alreadyMapped?: ReadonlySet<string>;
+  /**
+   * The specifiers the shipped files actually import, when the caller knows them.
+   *
+   * Omitting it takes the whole map, which is what a caller with nothing built yet has to do.
+   */
+  readonly used?: ReadonlySet<string>;
+}
+
 /** What a source config's imports come to once translated for npm. */
 export interface DerivedDependencies {
   /** Import specifier to the npm package name it becomes. */
@@ -712,16 +730,12 @@ export interface DerivedDependencies {
  *   package.
  * - **A relative or absolute path** is a file in the project and needs no dependency.
  *
- * `alreadyMapped` names the specifiers something else has already rewritten, usually to a
- * built-in like `node:path`. Those are skipped: a dependency declared for a specifier nothing
- * imports any more is an install of something unused, and for `bun:test` it is an install of
- * something that does not exist.
+ * What narrows the map is {@link DeriveOptions}.
  *
  * @example
  * ```ts
  * deriveDependencies(
  *   { "@hiisi/onlywhen": "jsr:@hiisi/onlywhen@^0.5.0", "chalk": "npm:chalk@^5" },
- *   new Set(),
  * );
  * // mappings: { "@hiisi/onlywhen": "@jsr/hiisi__onlywhen", chalk: "chalk" }
  * // dependencies: { "@jsr/hiisi__onlywhen": "^0.5.0", chalk: "^5" }
@@ -730,9 +744,9 @@ export interface DerivedDependencies {
  */
 export function deriveDependencies(
   imports: Readonly<Record<string, unknown>>,
-  alreadyMapped: ReadonlySet<string> = new Set(),
-  used?: ReadonlySet<string>,
+  options: DeriveOptions = {},
 ): DerivedDependencies {
+  const { alreadyMapped = new Set<string>(), used } = options;
   const mappings: Record<string, string> = {};
   const dependencies: Record<string, string> = {};
   let needsJsrRegistry = false;
