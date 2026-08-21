@@ -1,0 +1,17 @@
+{
+  "name": "@hiisi/subpaths-fixture",
+  "version": "0.1.0",
+  "description": "A fixture with subpath exports, so a distribution has more than one to get wrong.",
+  "license": "MPL-2.0",
+  "repository": "https://github.com/hiisi-digital/deno-dist",
+  "exports": {
+    ".": "./mod.ts",
+    "./cli": "./src/cli.ts",
+    "./schema": "./schema.json"
+  },
+  "distDir": "target",
+  "dist": {
+    "node": { "runtime": "node", "versions": ["22"], "plugins": ["deno-to-node"] },
+    "bun": { "runtime": "bun", "versions": ["latest"], "plugins": ["deno-to-bun"] }
+  }
+}

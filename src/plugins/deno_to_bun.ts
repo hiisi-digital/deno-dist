@@ -14,12 +14,14 @@ import {
   DEFAULT_ENTRY_POINT,
   deriveDependencies,
   ensureDirectory,
+  entryPointsOf,
   escapeRegex,
   failureResult,
   getPackageMetadata,
   getPackageName,
   getPackageVersion,
   JSR_NPM_REGISTRY,
+  npmExportsOf,
   runCommand,
   successResult,
   transformFiles,
@@ -383,6 +385,15 @@ function generatePackageJson(
   const entry = options?.bundle ? `dist/${entryPoint.replace(/\.ts$/, ".js")}` : entryPoint;
   const typesEntry = options?.bundle ? entryPoint : entry;
 
+  // Bundling collapses everything into one file, so there is one entry and the config's
+  // subpaths have nowhere to point. Unbundled, every export the config declares is a real
+  // file in the output and gets a subpath, which is what a consumer importing `pkg/cli`
+  // needs: a distribution built from the root export alone works perfectly from the output
+  // directory and fails for them.
+  const exports = options?.bundle
+    ? { ".": { types: `./${typesEntry}`, default: `./${entry}` } }
+    : npmExportsOf(entryPointsOf(context.variables.config, entryPoint));
+
   return {
     name,
     version,
@@ -391,12 +402,7 @@ function generatePackageJson(
     main: entry,
     module: entry,
     types: typesEntry,
-    exports: {
-      ".": {
-        types: `./${typesEntry}`,
-        default: `./${entry}`,
-      },
-    },
+    exports,
     ...(Object.keys(dependencies).length > 0 ? { dependencies } : {}),
     scripts: { test: "bun test" },
     engines: { bun: ">=1.0.0" },

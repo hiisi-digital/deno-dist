@@ -11,6 +11,7 @@ import {
   DEFAULT_COPY_FILES,
   DEFAULT_ENTRY_POINT,
   ensureDirectory,
+  entryPointsOf,
   failureResult,
   getPackageMetadata,
   getPackageName,
@@ -19,6 +20,7 @@ import {
   successResult,
   tryCopyFile,
 } from "./utils.ts";
+import type { EntryPoint } from "./utils.ts";
 
 // =============================================================================
 // Plugin Metadata
@@ -111,23 +113,34 @@ const denoToNodePlugin: Plugin = {
     context.log.info("Preparing Deno to Node.js transformation...");
 
     const options = context.pluginConfig.options as DenoToNodeOptions | undefined;
-    const entryPoint = options?.entryPoint ?? DEFAULT_ENTRY_POINT;
-    const fullEntryPath = `${context.sourceDir}/${entryPoint}`;
+    const entryPoints = resolveEntryPoints(context, options);
 
-    // Validate entry point exists
-    try {
-      const stat = await Deno.stat(fullEntryPath);
-      if (!stat.isFile) {
-        return failureResult(`Entry point is not a file: ${fullEntryPath}`, timer.elapsed());
+    // Every entry point, not only the first. A package whose config declares `./cli` and
+    // builds only `.` looks correct from the output directory, where the root export works,
+    // and fails for a consumer importing the subpath.
+    // All at once, because a stat is independent of every other one and a package with six
+    // exports would otherwise pay six round trips to say the same thing.
+    const checked = await Promise.all(entryPoints.map(async (entry) => {
+      const fullEntryPath = `${context.sourceDir}/${entry.path}`;
+      try {
+        const stat = await Deno.stat(fullEntryPath);
+        return stat.isFile ? undefined : `Entry point is not a file: ${fullEntryPath}`;
+      } catch (error) {
+        if (error instanceof Deno.errors.NotFound) {
+          return `Entry point not found: ${fullEntryPath}`;
+        }
+        return `Failed to check entry point: ${String(error)}`;
       }
-    } catch (error) {
-      if (error instanceof Deno.errors.NotFound) {
-        return failureResult(`Entry point not found: ${fullEntryPath}`, timer.elapsed());
-      }
-      return failureResult(`Failed to check entry point: ${String(error)}`, timer.elapsed());
+    }));
+
+    const missing = checked.find((problem) => problem !== undefined);
+    if (missing !== undefined) {
+      return failureResult(missing, timer.elapsed());
     }
 
-    context.log.info(`Entry point validated: ${entryPoint}`);
+    context.log.info(
+      `Entry points validated: ${entryPoints.map((e) => `${e.name} -> ${e.path}`).join(", ")}`,
+    );
 
     // Warn about potential issues
     if (options?.test && !options?.testPattern) {
@@ -147,7 +160,7 @@ const denoToNodePlugin: Plugin = {
     context.log.info("Transforming Deno code to Node.js using dnt...");
 
     const options = context.pluginConfig.options as DenoToNodeOptions | undefined;
-    const entryPoint = options?.entryPoint ?? DEFAULT_ENTRY_POINT;
+    const entryPoints = resolveEntryPoints(context, options);
 
     // Resolve package name and version from options or config
     const packageName = options?.packageName ?? getPackageName(context);
@@ -157,7 +170,7 @@ const denoToNodePlugin: Plugin = {
     const buildScript = generateBuildScript({
       sourceDir: context.sourceDir,
       outputDir: context.outputDir,
-      entryPoint,
+      entryPoints,
       packageName,
       packageVersion,
       packageMetadata: getPackageMetadata(context),
@@ -266,7 +279,7 @@ async function cleanupTempScript(scriptPath: string): Promise<void> {
 function generateBuildScript(options: {
   sourceDir: string;
   outputDir: string;
-  entryPoint: string;
+  entryPoints: readonly EntryPoint[];
   packageName: string;
   packageVersion: string;
   packageMetadata: Record<string, unknown>;
@@ -280,7 +293,9 @@ function generateBuildScript(options: {
   const shims = options.shims ?? {};
 
   // Escape strings for safe embedding in JavaScript
-  const safeEntryPoint = escapeJsString(options.entryPoint);
+  const safeEntryPoints = options.entryPoints
+    .map((entry) => `{ name: ${escapeJsString(entry.name)}, path: ${escapeJsString(entry.path)} }`)
+    .join(", ");
   const safeOutputDir = escapeJsString(options.outputDir);
 
   // dnt spreads this straight into the generated package.json, so everything
@@ -317,7 +332,7 @@ import { build, emptyDir } from "jsr:@deno/dnt";
 await emptyDir(${safeOutputDir});
 
 await build({
-  entryPoints: [${safeEntryPoint}],
+  entryPoints: [${safeEntryPoints}],
   outDir: ${safeOutputDir},
   shims: {
     deno: ${JSON.stringify(shimsConfig.deno)},
@@ -372,3 +387,20 @@ function escapeJsString(str: string): string {
 
 export default denoToNodePlugin;
 export { denoToNodePlugin };
+
+/**
+ * The entry points to build, from the plugin options or from the source config.
+ *
+ * An explicit `entryPoint` option still wins and still means one entry, because a consumer
+ * who named one meant one. With no option, the config's `exports` decides, which is what
+ * makes a package with subpath exports produce a distribution that has them.
+ */
+function resolveEntryPoints(
+  context: PluginContext,
+  options: DenoToNodeOptions | undefined,
+): EntryPoint[] {
+  if (options?.entryPoint !== undefined) {
+    return [{ name: ".", path: options.entryPoint }];
+  }
+  return entryPointsOf(context.variables.config, DEFAULT_ENTRY_POINT);
+}
