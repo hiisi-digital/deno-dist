@@ -1,0 +1,16 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:reflect-metadata@~0.2.2": "0.2.2"
+  },
+  "npm": {
+    "reflect-metadata@0.2.2": {
+      "integrity": "sha512-urBwgfrvVP/eAyXx4hluJivBKzuEbSQs9rKWCrCkbSxNv8mxPcUZKeuoF3Uy4mJl3Lwprp6yy5/39VWigZ4K6Q=="
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:reflect-metadata@~0.2.2"
+    ]
+  }
+}

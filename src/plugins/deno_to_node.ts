@@ -11,6 +11,7 @@ import {
   createTimer,
   DEFAULT_COPY_FILES,
   DEFAULT_ENTRY_POINT,
+  dntCompilerOptions,
   ensureDirectory,
   entryPointsOf,
   failureResult,
@@ -212,6 +213,7 @@ const denoToNodePlugin: Plugin = {
           : {}),
         ...(Object.keys(bin).length > 0 ? { bin } : {}),
       },
+      compilerOptions: dntCompilerOptions(context.variables.config),
       declaration: options?.declaration ?? "inline",
       esm: options?.esm ?? true,
       cjs: options?.cjs ?? true,
@@ -351,6 +353,7 @@ function generateBuildScript(options: {
   packageMetadata: Record<string, unknown>;
   declaration: "inline" | "separate" | false;
   esm: boolean;
+  compilerOptions: Record<string, unknown>;
   cjs: boolean;
   test: boolean;
   shims?: DenoToNodeShims;
@@ -411,9 +414,7 @@ await build({
     webSocket: ${shimsConfig.webSocket},
   },
   package: ${packageBlock},
-  compilerOptions: {
-    lib: ["ES2022", "DOM"],
-  },
+  compilerOptions: ${JSON.stringify(options.compilerOptions)},
   typeCheck: "both",
   declaration: ${JSON.stringify(options.declaration)},
   esModule: ${options.esm},

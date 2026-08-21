@@ -893,6 +893,47 @@ export function npmExportsOf(
 }
 
 /**
+ * The compiler options a source config sets that dnt also understands.
+ *
+ * dnt takes a small named subset rather than a whole tsconfig, so the ones it
+ * has no opinion about are dropped here rather than passed through to be
+ * rejected. What it does take, it needs: a package whose sources use decorators
+ * compiles under deno, which enables them by config, and fails under dnt, which
+ * was never told. The failure is a type error on every decorated declaration, so
+ * it is at least loud; `emitDecoratorMetadata` is the quiet one, because without
+ * it the code compiles and the metadata a framework reflects on is simply not
+ * there.
+ *
+ * `lib` is the one this tool sets itself, since the target is node rather than
+ * whatever the source was written against. A config that names its own wins,
+ * because a package that says what it needs has said it deliberately.
+ */
+export function dntCompilerOptions(
+  config: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const declared = config["compilerOptions"];
+  const options: Record<string, unknown> = { lib: ["ES2022", "DOM"] };
+  if (declared === null || typeof declared !== "object") return options;
+
+  const understood = [
+    "target",
+    "lib",
+    "importHelpers",
+    "experimentalDecorators",
+    "emitDecoratorMetadata",
+    "skipLibCheck",
+    "strictBindCallApply",
+    "useUnknownInCatchVariables",
+    "stripInternal",
+  ];
+  for (const key of understood) {
+    const value = (declared as Record<string, unknown>)[key];
+    if (value !== undefined) options[key] = value;
+  }
+  return options;
+}
+
+/**
  * The commands a package installs, with each path put where the distribution
  * actually wrote it.
  *
