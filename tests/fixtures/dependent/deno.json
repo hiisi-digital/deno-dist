@@ -1,0 +1,19 @@
+{
+  "name": "@hiisi/dependent-fixture",
+  "version": "0.1.0",
+  "description": "A fixture that depends on a jsr package, so a built distribution has something to resolve.",
+  "license": "MPL-2.0",
+  "repository": "https://github.com/hiisi-digital/deno-dist",
+  "exports": "./mod.ts",
+  "imports": {
+    "@hiisi/onlywhen": "jsr:@hiisi/onlywhen@^0.5.0"
+  },
+  "distDir": "target",
+  "dist": {
+    "bun": {
+      "runtime": "bun",
+      "versions": ["latest"],
+      "plugins": ["deno-to-bun"]
+    }
+  }
+}
