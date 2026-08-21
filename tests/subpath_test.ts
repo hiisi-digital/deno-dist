@@ -11,7 +11,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
-import { entryPointsOf, npmExportsOf } from "../src/plugins/utils.ts";
+import { entryPointsOf, npmExportsOf, selfImportsOf } from "../src/plugins/utils.ts";
 
 const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const FIXTURE = join(REPO_ROOT, "tests", "fixtures", "subpaths");
@@ -148,3 +148,27 @@ async function copyTree(from: string, to: string): Promise<void> {
     else await Deno.copyFile(source, destination);
   }
 }
+
+Deno.test("self-imports come through, and only the ones npm can express", () => {
+  const self = selfImportsOf({
+    imports: {
+      "#core": "./core/mod.ts",
+      "#up": "../shared/mod.ts",
+      "@std/fs": "jsr:@std/fs@^1.0.0",
+      "#dep": "jsr:@scope/pkg@^1.0.0",
+    },
+  });
+  assertEquals(self["#core"], "./core/mod.ts");
+  assertEquals(self["#up"], "../shared/mod.ts");
+  // A dependency is not a self-import even when it is spelled with a hash. Node requires the
+  // target to be a relative path, so writing this one would ship a name that will not
+  // resolve, which is the failure the whole function exists to prevent.
+  assertEquals(self["#dep"], undefined);
+  assertEquals(self["@std/fs"], undefined);
+});
+
+Deno.test("a config with no self-imports yields none", () => {
+  // Without this, a function returning a fixed non-empty map satisfies the test above.
+  assertEquals(Object.keys(selfImportsOf({ imports: { "@std/fs": "jsr:@std/fs@^1" } })).length, 0);
+  assertEquals(Object.keys(selfImportsOf({})).length, 0);
+});

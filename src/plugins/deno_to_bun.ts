@@ -24,6 +24,7 @@ import {
   JSR_NPM_REGISTRY,
   npmExportsOf,
   runCommand,
+  selfImportsOf,
   successResult,
   transformFiles,
   tryCopyFile,
@@ -402,6 +403,11 @@ function generatePackageJson(
   // file in the output and gets a subpath, which is what a consumer importing `pkg/cli`
   // needs: a distribution built from the root export alone works perfectly from the output
   // directory and fails for them.
+  // Node's package.json `imports` is the same feature a Deno config spells with a leading
+  // `#`, and bun reads it too, so carrying them through is all that is needed: no rewriting,
+  // and the files keep the names they were written with.
+  const selfImports = selfImportsOf(context.variables.config);
+
   const exports = options?.bundle
     ? { ".": { types: `./${typesEntry}`, default: `./${entry}` } }
     : npmExportsOf(entryPointsOf(context.variables.config, entryPoint));
@@ -415,6 +421,7 @@ function generatePackageJson(
     module: entry,
     types: typesEntry,
     exports,
+    ...(Object.keys(selfImports).length > 0 ? { imports: selfImports } : {}),
     ...(Object.keys(dependencies).length > 0 ? { dependencies } : {}),
     scripts: { test: "bun test" },
     engines: { bun: ">=1.0.0" },
