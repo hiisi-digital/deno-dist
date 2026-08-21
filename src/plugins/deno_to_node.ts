@@ -12,6 +12,7 @@ import {
   DEFAULT_ENTRY_POINT,
   ensureDirectory,
   failureResult,
+  getPackageMetadata,
   getPackageName,
   getPackageVersion,
   runDenoScript,
@@ -50,8 +51,8 @@ export interface DenoToNodeOptions {
   readonly packageName?: string;
   /** Package version */
   readonly packageVersion?: string;
-  /** Whether to include type declarations (default: true) */
-  readonly declaration?: boolean;
+  /** Declaration emit, on dnt's own contract (default: "inline") */
+  readonly declaration?: "inline" | "separate" | false;
   /** Whether to generate ESM output (default: true) */
   readonly esm?: boolean;
   /** Whether to generate CJS output (default: true) */
@@ -159,7 +160,8 @@ const denoToNodePlugin: Plugin = {
       entryPoint,
       packageName,
       packageVersion,
-      declaration: options?.declaration ?? true,
+      packageMetadata: getPackageMetadata(context),
+      declaration: options?.declaration ?? "inline",
       esm: options?.esm ?? true,
       cjs: options?.cjs ?? true,
       test: options?.test ?? false,
@@ -267,7 +269,8 @@ function generateBuildScript(options: {
   entryPoint: string;
   packageName: string;
   packageVersion: string;
-  declaration: boolean;
+  packageMetadata: Record<string, unknown>;
+  declaration: "inline" | "separate" | false;
   esm: boolean;
   cjs: boolean;
   test: boolean;
@@ -279,8 +282,19 @@ function generateBuildScript(options: {
   // Escape strings for safe embedding in JavaScript
   const safeEntryPoint = escapeJsString(options.entryPoint);
   const safeOutputDir = escapeJsString(options.outputDir);
-  const safePackageName = escapeJsString(options.packageName);
-  const safePackageVersion = escapeJsString(options.packageVersion);
+
+  // dnt spreads this straight into the generated package.json, so everything
+  // the registry wants rides along here: description, license, repository and
+  // the rest, not only the name and version this block used to carry.
+  const packageBlock = JSON.stringify(
+    {
+      name: options.packageName,
+      version: options.packageVersion,
+      ...options.packageMetadata,
+    },
+    null,
+    2,
+  ).replace(/\n/g, "\n  ");
 
   // Build shims configuration
   const shimsConfig = {
@@ -315,15 +329,12 @@ await build({
     weakRef: ${shimsConfig.weakRef},
     webSocket: ${shimsConfig.webSocket},
   },
-  package: {
-    name: ${safePackageName},
-    version: ${safePackageVersion},
-  },
+  package: ${packageBlock},
   compilerOptions: {
     lib: ["ES2022", "DOM"],
   },
   typeCheck: "both",
-  declaration: ${options.declaration},
+  declaration: ${JSON.stringify(options.declaration)},
   esModule: ${options.esm},
   scriptModule: ${options.cjs ? '"cjs"' : "false"},
   test: ${options.test},

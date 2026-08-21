@@ -15,6 +15,7 @@ import {
   ensureDirectory,
   escapeRegex,
   failureResult,
+  getPackageMetadata,
   getPackageName,
   getPackageVersion,
   runCommand,
@@ -333,6 +334,17 @@ function buildBundleArgs(
 
 /**
  * Generate package.json for the Bun output.
+ *
+ * The transform copies TypeScript sources; nothing here compiles anything.
+ * So the manifest points at the .ts entry itself, which bun resolves and runs
+ * natively, and which TypeScript reads its types straight out of. The first
+ * version of this function rewrote the entries to .js and .d.ts names no step
+ * ever emitted, and every package built by it failed to install: bun found no
+ * file behind "main" and reported the whole package as missing. The manifest
+ * describes what is on disk, never what a compile step would have produced.
+ *
+ * When bundling is enabled the entry moves to where bun build actually writes
+ * it, and the types entry stays on the source file the bundle was built from.
  */
 function generatePackageJson(
   context: PluginContext,
@@ -340,22 +352,24 @@ function generatePackageJson(
 ): Record<string, unknown> {
   const name = getPackageName(context);
   const version = getPackageVersion(context);
+  const metadata = getPackageMetadata(context);
   const entryPoint = options?.entryPoint ?? DEFAULT_ENTRY_POINT;
 
-  const jsEntry = entryPoint.replace(/\.ts$/, ".js");
-  const dtsEntry = entryPoint.replace(/\.ts$/, ".d.ts");
+  const entry = options?.bundle ? `dist/${entryPoint.replace(/\.ts$/, ".js")}` : entryPoint;
+  const typesEntry = options?.bundle ? entryPoint : entry;
 
   return {
     name,
     version,
+    ...metadata,
     type: "module",
-    main: jsEntry,
-    module: jsEntry,
-    types: dtsEntry,
+    main: entry,
+    module: entry,
+    types: typesEntry,
     exports: {
       ".": {
-        import: `./${jsEntry}`,
-        types: `./${dtsEntry}`,
+        types: `./${typesEntry}`,
+        default: `./${entry}`,
       },
     },
     scripts: { test: "bun test" },

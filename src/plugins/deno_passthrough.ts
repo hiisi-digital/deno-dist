@@ -6,6 +6,7 @@
  */
 
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
+import { parse as parseJsonc } from "@std/jsonc";
 import {
   collectFiles,
   type CollectFilesOptions,
@@ -261,26 +262,43 @@ async function processFile(
 }
 
 /**
- * Copy deno.json or deno.jsonc if it exists.
+ * Write the source deno.json into the output, minus the build machinery.
+ *
+ * A verbatim copy shipped this tool's own configuration inside every
+ * published artifact: the `dist` table and `distDir` are instructions to the
+ * build, not part of the package, and a consumer has no use for them. The
+ * config is parsed (jsonc included, comments do not survive and are not meant
+ * to in a generated artifact), the build keys are dropped, and the rest goes
+ * out as deno.json whichever spelling the source used.
  */
 async function copyDenoConfig(context: PluginContext): Promise<string | null> {
-  // Try deno.json first
-  try {
-    const srcPath = `${context.sourceDir}/deno.json`;
-    const destPath = `${context.outputDir}/deno.json`;
-    await Deno.copyFile(srcPath, destPath);
-    return destPath;
-  } catch {
-    // Try deno.jsonc
-    try {
-      const srcPath = `${context.sourceDir}/deno.jsonc`;
-      const destPath = `${context.outputDir}/deno.jsonc`;
-      await Deno.copyFile(srcPath, destPath);
-      return destPath;
-    } catch {
-      return null;
-    }
+  const candidates = [
+    `${context.sourceDir}/deno.json`,
+    `${context.sourceDir}/deno.jsonc`,
+  ];
+  const contents = await Promise.all(
+    candidates.map(async (path) => {
+      try {
+        return await Deno.readTextFile(path);
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const content = contents.find((c) => c !== null);
+  if (content === undefined) {
+    return null;
   }
+  const parsed = parseJsonc(content);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const config = { ...(parsed as Record<string, unknown>) };
+  delete config["dist"];
+  delete config["distDir"];
+  const destPath = `${context.outputDir}/deno.json`;
+  await Deno.writeTextFile(destPath, JSON.stringify(config, null, 2) + "\n");
+  return destPath;
 }
 
 /**

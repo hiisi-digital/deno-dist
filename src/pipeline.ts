@@ -7,6 +7,7 @@
 
 import { ensureDir } from "@std/fs";
 import { join } from "@std/path";
+import { parse as parseJsonc } from "@std/jsonc";
 import { BUILD_PHASE_IDS, LIFECYCLE_PHASE_IDS } from "./generated_types.ts";
 import {
   buildExecutionGraph,
@@ -137,35 +138,50 @@ let cachedConfigRecord: Record<string, unknown> | null = null;
 let cachedConfigPath: string | null = null;
 
 /**
- * Load the current deno.json config as a record for template variables.
- * Results are cached per config path.
+ * Load the current deno.json config as a record for template variables and
+ * for the metadata every generated manifest is built from. Results are cached
+ * per config path.
+ *
+ * Parsing is @std/jsonc for both spellings, because jsonc is a superset of
+ * json and because the previous hand-rolled comment strip truncated any
+ * string containing `//`. A description with a URL in it is the ordinary
+ * case, and the silent catch that followed turned the whole config into an
+ * empty record, which is how a package ships as "package" at "0.0.0". A file
+ * that is missing yields an empty record; a file that is present and
+ * malformed is an error the caller hears about, because the build has nothing
+ * true to say without it.
  */
-async function loadConfigAsRecord(configPath = "deno.json"): Promise<Record<string, unknown>> {
+export async function loadConfigAsRecord(
+  configPath = "deno.json",
+): Promise<Record<string, unknown>> {
   // Return cached if same path
   if (cachedConfigRecord !== null && cachedConfigPath === configPath) {
     return cachedConfigRecord;
   }
 
-  try {
-    const content = await Deno.readTextFile(configPath);
-    cachedConfigRecord = JSON.parse(content) as Record<string, unknown>;
+  const candidates = [configPath, configPath.replace(/\.json$/, ".jsonc")];
+  const contents = await Promise.all(
+    candidates.map(async (path) => {
+      try {
+        return await Deno.readTextFile(path);
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const content = contents.find((c) => c !== null);
+  if (content === undefined) {
+    cachedConfigRecord = {};
     cachedConfigPath = configPath;
     return cachedConfigRecord;
-  } catch {
-    try {
-      const jsoncPath = configPath.replace(/\.json$/, ".jsonc");
-      const content = await Deno.readTextFile(jsoncPath);
-      // Simple JSONC handling - remove comments
-      const cleaned = content.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-      cachedConfigRecord = JSON.parse(cleaned) as Record<string, unknown>;
-      cachedConfigPath = jsoncPath;
-      return cachedConfigRecord;
-    } catch {
-      cachedConfigRecord = {};
-      cachedConfigPath = configPath;
-      return cachedConfigRecord;
-    }
   }
+
+  const parsed = parseJsonc(content);
+  cachedConfigRecord = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {};
+  cachedConfigPath = configPath;
+  return cachedConfigRecord;
 }
 
 /**
