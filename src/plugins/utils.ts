@@ -928,3 +928,40 @@ export function importedSpecifiers(sources: Iterable<string>): Set<string> {
   }
   return found;
 }
+
+/**
+ * The `#`-prefixed self-imports a source config declares, as npm spells them.
+ *
+ * Deno and Node both let a package refer to its own files by a name rather than by a path,
+ * and both spell it with a leading `#`. Deno puts them in the same `imports` map as its
+ * dependencies; Node has a separate `imports` field in package.json for exactly this, and bun
+ * reads it too.
+ *
+ * A distribution that drops them ships files importing a name nothing resolves, which fails at
+ * load with `Cannot find package '#core'` and is invisible until then: every file is present
+ * and every path in the manifest exists.
+ *
+ * @example
+ * ```ts
+ * selfImportsOf({ imports: { "#core": "./core/mod.ts", "@std/fs": "jsr:@std/fs@^1" } });
+ * // { "#core": "./core/mod.ts" }
+ * ```
+ */
+export function selfImportsOf(
+  config: Readonly<Record<string, unknown>>,
+): Record<string, string> {
+  const imports = config["imports"];
+  if (imports === null || typeof imports !== "object") return {};
+
+  const self: Record<string, string> = {};
+  for (const [name, target] of Object.entries(imports as Record<string, unknown>)) {
+    if (!name.startsWith("#")) continue;
+    if (typeof target !== "string") continue;
+    // Node requires the target of a self-import to be a relative path, which is what a Deno
+    // config uses for one anyway. Anything else is a dependency wearing a `#`, and npm has no
+    // reading for it, so it is left out rather than written as something that will not resolve.
+    if (!target.startsWith("./") && !target.startsWith("../")) continue;
+    self[name] = target;
+  }
+  return self;
+}

@@ -17,6 +17,7 @@ import {
   getPackageName,
   getPackageVersion,
   runDenoScript,
+  selfImportsOf,
   successResult,
   tryCopyFile,
 } from "./utils.ts";
@@ -173,7 +174,15 @@ const denoToNodePlugin: Plugin = {
       entryPoints,
       packageName,
       packageVersion,
-      packageMetadata: getPackageMetadata(context),
+      packageMetadata: {
+        ...getPackageMetadata(context),
+        // The `#`-prefixed self-imports, which Node resolves through package.json `imports`.
+        // dnt writes whatever the package block carries, so they travel that way rather than
+        // through a rewrite, and the source keeps the names it was written with.
+        ...(Object.keys(selfImportsOf(context.variables.config)).length > 0
+          ? { imports: selfImportsOf(context.variables.config) }
+          : {}),
+      },
       declaration: options?.declaration ?? "inline",
       esm: options?.esm ?? true,
       cjs: options?.cjs ?? true,
