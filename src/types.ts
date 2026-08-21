@@ -622,6 +622,39 @@ export interface CliCommand {
 }
 
 /**
+ * The flags every command may be given.
+ *
+ * Named one by one rather than as a `Record<string, string | boolean>`. The record shape
+ * carried no information, so every use site cast: `args.flags.all as boolean` appeared
+ * twelve times, and a cast is an assertion nothing checks, so a flag that changed type
+ * would have become a runtime failure at each of them rather than a compile error at one.
+ *
+ * It also could not type-check: `--tag` and `--notes` are genuinely optional, and
+ * `undefined` is not in `string | boolean`, so assigning them was two errors that
+ * `deno check` reported and `deno test` did not.
+ */
+export interface CliFlags {
+  /** Print usage and exit. */
+  readonly help: boolean;
+  /** Print the version and exit. */
+  readonly version: boolean;
+  /** Say more about what is happening. */
+  readonly verbose: boolean;
+  /** Remove previous output before building. */
+  readonly clean: boolean;
+  /** Build every target rather than the named one. */
+  readonly all: boolean;
+  /** Report what would happen without doing it. */
+  readonly dryRun: boolean;
+  /** Where the configuration lives. Defaults to `deno.json`. */
+  readonly config: string;
+  /** The release tag, where a command takes one. */
+  readonly tag?: string;
+  /** A path to release notes, where a command takes one. */
+  readonly notes?: string;
+}
+
+/**
  * Parsed CLI arguments.
  */
 export interface CliArgs {
@@ -630,7 +663,7 @@ export interface CliArgs {
   /** Positional arguments */
   readonly positional: readonly string[];
   /** Named flags and options */
-  readonly flags: Record<string, string | boolean>;
+  readonly flags: CliFlags;
   /** Scope variables from --scope */
   readonly scope: Record<string, string>;
 }
