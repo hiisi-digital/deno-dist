@@ -1,0 +1,23 @@
+{
+  "name": "@hiisi/parity-fixture",
+  "version": "0.1.0",
+  "description": "Fixture package for the distribution end-to-end tests.",
+  "license": "MPL-2.0",
+  "repository": "https://github.com/hiisi-digital/deno-dist",
+  "exports": "./mod.ts",
+  "distDir": "target",
+  "dist": {
+    "node": {
+      "runtime": "node",
+      "plugins": ["deno-to-node"]
+    },
+    "bun": {
+      "runtime": "bun",
+      "plugins": ["deno-to-bun"]
+    },
+    "deno": {
+      "runtime": "deno",
+      "plugins": ["deno-passthrough"]
+    }
+  }
+}
