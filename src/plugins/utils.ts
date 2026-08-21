@@ -461,6 +461,42 @@ export function getPackageVersion(context: PluginContext): string {
   return typeof configVersion === "string" && configVersion.length > 0 ? configVersion : "0.0.0";
 }
 
+/**
+ * Registry metadata the source config carries, in the shape a package.json
+ * takes it.
+ *
+ * A registry asks for more than a name and a version, and the source
+ * deno.json usually already has the answers: description, license, author,
+ * homepage, keywords, repository. Every generated manifest used to drop all
+ * of them on the floor, so an npm publish of the output warned about the
+ * license and showed an empty description for a package whose source had
+ * both. Only fields that are actually present come through; nothing is
+ * invented here.
+ */
+export function getPackageMetadata(context: PluginContext): Record<string, unknown> {
+  const config = context.variables.config;
+  const metadata: Record<string, unknown> = {};
+  for (const key of ["description", "license", "author", "homepage"]) {
+    const value = config[key];
+    if (typeof value === "string" && value.length > 0) {
+      metadata[key] = value;
+    }
+  }
+  const keywords = config["keywords"];
+  if (Array.isArray(keywords) && keywords.length > 0) {
+    metadata["keywords"] = keywords;
+  }
+  // npm takes repository as a shorthand string or as an object; pass either
+  const repository = config["repository"];
+  if (
+    (typeof repository === "string" && repository.length > 0) ||
+    (repository !== null && typeof repository === "object")
+  ) {
+    metadata["repository"] = repository;
+  }
+  return metadata;
+}
+
 // =============================================================================
 // Result Helpers
 // =============================================================================

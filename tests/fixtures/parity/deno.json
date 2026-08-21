@@ -9,15 +9,32 @@
   "dist": {
     "node": {
       "runtime": "node",
-      "plugins": ["deno-to-node"]
+      "plugins": [
+        "deno-to-node"
+      ]
     },
     "bun": {
       "runtime": "bun",
-      "plugins": ["deno-to-bun"]
+      "plugins": [
+        "deno-to-bun"
+      ]
     },
     "deno": {
       "runtime": "deno",
-      "plugins": ["deno-passthrough"]
+      "plugins": [
+        "deno-passthrough"
+      ]
+    },
+    "bun-bundled": {
+      "runtime": "bun",
+      "plugins": [
+        {
+          "id": "deno-to-bun",
+          "options": {
+            "bundle": true
+          }
+        }
+      ]
     }
   }
 }

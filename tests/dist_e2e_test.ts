@@ -130,6 +130,7 @@ Deno.test("built distributions install, run and agree", async (t) => {
   const targets = {
     node: join(project, "target", "node"),
     bun: join(project, "target", "bun"),
+    bunBundled: join(project, "target", "bun-bundled"),
     deno: join(project, "target", "deno"),
   };
   const outputs: Record<string, string> = {};
@@ -144,8 +145,11 @@ Deno.test("built distributions install, run and agree", async (t) => {
         project,
       );
       assertRan(result, "build --all");
-      for (const dir of Object.values(targets)) {
-        assert(await exists(dir), `missing output directory: ${dir}`);
+      const found = await Promise.all(
+        Object.values(targets).map(async (dir) => [dir, await exists(dir)] as const),
+      );
+      for (const [dir, ok] of found) {
+        assert(ok, `missing output directory: ${dir}`);
       }
     });
 
@@ -153,23 +157,28 @@ Deno.test("built distributions install, run and agree", async (t) => {
       const manifests: Array<[string, string]> = [
         [targets.node, "package.json"],
         [targets.bun, "package.json"],
+        [targets.bunBundled, "package.json"],
         [targets.deno, "deno.json"],
       ];
-      const missing: string[] = [];
-      for (const [dir, file] of manifests) {
+      const missing = (await Promise.all(manifests.map(async ([dir, file]) => {
         const manifest = await readJson(join(dir, file));
-        for (const rel of manifestPaths(manifest)) {
-          if (!(await exists(join(dir, rel)))) {
-            missing.push(`${join(dir, file)} names ${rel}, which does not exist`);
-          }
-        }
-      }
+        const checks = await Promise.all(
+          manifestPaths(manifest).map(async (rel) => [rel, await exists(join(dir, rel))] as const),
+        );
+        return checks
+          .filter(([, ok]) => !ok)
+          .map(([rel]) => `${join(dir, file)} names ${rel}, which does not exist`);
+      }))).flat();
       assertEquals(missing, [], `manifests naming phantom files:\n  ${missing.join("\n  ")}`);
     });
 
     await t.step("manifests carry the metadata the source config has", async () => {
-      for (const dir of [targets.node, targets.bun]) {
-        const manifest = await readJson(join(dir, "package.json"));
+      const manifests = await Promise.all(
+        [targets.node, targets.bun, targets.bunBundled].map(async (dir) =>
+          [dir, await readJson(join(dir, "package.json"))] as const
+        ),
+      );
+      for (const [dir, manifest] of manifests) {
         assertEquals(manifest["name"], "@hiisi/parity-fixture", dir);
         assertEquals(manifest["version"], "0.1.0", dir);
         assertEquals(
@@ -235,21 +244,16 @@ Deno.test("built distributions install, run and agree", async (t) => {
     });
 
     await t.step("the bun distribution installs and imports by name", async () => {
-      const consumer = join(work, "bun-consumer");
-      await Deno.mkdir(consumer);
-      await Deno.writeTextFile(
-        join(consumer, "package.json"),
-        JSON.stringify({
-          name: "consumer",
-          private: true,
-          dependencies: { "@hiisi/parity-fixture": `file:${targets.bun}` },
-        }),
+      outputs["bun"] = await installAndRunUnderBun(join(work, "bun-consumer"), targets.bun);
+    });
+
+    await t.step("the bundled bun distribution installs and imports by name", async () => {
+      // the bundle arm rewrites the manifest entries to bun build's output,
+      // which is a separate branch of the manifest generator and stays tested
+      outputs["bunBundled"] = await installAndRunUnderBun(
+        join(work, "bun-bundled-consumer"),
+        targets.bunBundled,
       );
-      await Deno.writeTextFile(join(consumer, "main.ts"), CONSUMER_PROGRAM);
-      assertRan(await run("bun", ["install"], consumer), "bun install");
-      const result = await run("bun", ["main.ts"], consumer);
-      assertRan(result, "bun main.ts");
-      outputs["bun"] = result.stdout;
     });
 
     await t.step("the deno distribution resolves by name and runs", async () => {
@@ -270,15 +274,34 @@ Deno.test("built distributions install, run and agree", async (t) => {
       outputs["deno"] = result.stdout;
     });
 
-    await t.step("all three runtimes print identical output", () => {
+    await t.step("every runtime prints identical output", () => {
       assert(outputs["node"] !== undefined, "node output missing");
       assertEquals(outputs["bun"], outputs["node"], "bun disagrees with node");
+      assertEquals(outputs["bunBundled"], outputs["node"], "bundled bun disagrees with node");
       assertEquals(outputs["deno"], outputs["node"], "deno disagrees with node");
     });
   } finally {
     await Deno.remove(work, { recursive: true });
   }
 });
+
+/** Install a distribution as a file dependency and run the consumer under bun. */
+async function installAndRunUnderBun(consumer: string, target: string): Promise<string> {
+  await Deno.mkdir(consumer);
+  await Deno.writeTextFile(
+    join(consumer, "package.json"),
+    JSON.stringify({
+      name: "consumer",
+      private: true,
+      dependencies: { "@hiisi/parity-fixture": `file:${target}` },
+    }),
+  );
+  await Deno.writeTextFile(join(consumer, "main.ts"), CONSUMER_PROGRAM);
+  assertRan(await run("bun", ["install"], consumer), `bun install of ${target}`);
+  const result = await run("bun", ["main.ts"], consumer);
+  assertRan(result, `bun main.ts against ${target}`);
+  return result.stdout;
+}
 
 /** Recursive copy. @std/fs copy exists, but this avoids a new import surface. */
 async function copyTree(from: string, to: string): Promise<void> {
