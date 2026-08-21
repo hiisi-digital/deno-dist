@@ -731,6 +731,7 @@ export interface DerivedDependencies {
 export function deriveDependencies(
   imports: Readonly<Record<string, unknown>>,
   alreadyMapped: ReadonlySet<string> = new Set(),
+  used?: ReadonlySet<string>,
 ): DerivedDependencies {
   const mappings: Record<string, string> = {};
   const dependencies: Record<string, string> = {};
@@ -739,6 +740,11 @@ export function deriveDependencies(
   for (const [specifier, target] of Object.entries(imports)) {
     if (typeof target !== "string") continue;
     if (alreadyMapped.has(specifier)) continue;
+    // An import map is the whole project's, tests included, and the tests are not shipped.
+    // Declaring a dependency the distribution never imports makes an install fetch something
+    // unused, and for a test-only jsr package it makes the install fail outright: `@std/assert`
+    // has no npm publication under its own name at all.
+    if (used !== undefined && !used.has(specifier)) continue;
 
     if (target.startsWith("jsr:")) {
       const parsed = splitVersion(target.slice("jsr:".length));
@@ -870,4 +876,41 @@ export function npmExportsOf(
     map[entry.name] = { types: path, default: path };
   }
   return map;
+}
+
+/**
+ * Every bare specifier the given sources import.
+ *
+ * A bare specifier is one that is neither a path nor a protocol: `@hiisi/onlywhen` rather
+ * than `./local.ts` or `node:fs`. Those are the ones an import map resolves and a built
+ * package therefore has to declare.
+ *
+ * Regex rather than a parse, deliberately. This runs over the emitted output to decide what
+ * to write into a manifest, and a full parse of every file to answer one question about its
+ * import statements costs more than the answer is worth. The cost of being wrong is bounded
+ * in the safe direction too: an over-match declares a dependency nothing uses, which installs
+ * and sits there, where a parse failure would drop one and break the package.
+ */
+export function importedSpecifiers(sources: Iterable<string>): Set<string> {
+  const found = new Set<string>();
+  // `from "x"`, `import "x"`, and `import("x")`, which between them is every form that names
+  // a module. The specifier is captured and filtered rather than matched precisely, because
+  // the shapes a specifier can take are simpler to test than to express here.
+  const pattern = /(?:\bfrom\s*|\bimport\s*|\bimport\s*\(\s*)["']([^"']+)["']/g;
+  for (const source of sources) {
+    for (const match of source.matchAll(pattern)) {
+      const specifier = match[1];
+      if (specifier === undefined) continue;
+      if (specifier.startsWith(".") || specifier.startsWith("/")) continue;
+      if (/^[a-z][a-z0-9+.-]*:/.test(specifier)) continue;
+      // A subpath import resolves through the package it names, so `@scope/pkg/sub` is a use
+      // of `@scope/pkg`. Both are recorded, because an import map can key on either.
+      found.add(specifier);
+      const scoped = /^(@[^/]+\/[^/]+)\//.exec(specifier);
+      if (scoped?.[1] !== undefined) found.add(scoped[1]);
+      const bare = /^([^@][^/]*)\//.exec(specifier);
+      if (bare?.[1] !== undefined) found.add(bare[1]);
+    }
+  }
+  return found;
 }
