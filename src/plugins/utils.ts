@@ -678,3 +678,118 @@ export const DEFAULT_COPY_FILES: readonly string[] = ["LICENSE", "README.md"];
 
 /** Default entry point for packages */
 export const DEFAULT_ENTRY_POINT = "mod.ts";
+
+// =============================================================================
+// Dependency derivation
+// =============================================================================
+
+/** The npm registry that serves jsr packages, and where a `@jsr/` scope resolves. */
+export const JSR_NPM_REGISTRY = "https://npm.jsr.io";
+
+/** What a source config's imports come to once translated for npm. */
+export interface DerivedDependencies {
+  /** Import specifier to the npm package name it becomes. */
+  readonly mappings: Readonly<Record<string, string>>;
+  /** The `dependencies` block for a generated package.json. */
+  readonly dependencies: Readonly<Record<string, string>>;
+  /** Whether anything here needs the `@jsr` scope pointed at jsr's registry. */
+  readonly needsJsrRegistry: boolean;
+}
+
+/**
+ * The npm dependencies a Deno import map implies.
+ *
+ * A distribution that copies its imports through unchanged cannot resolve them: the runtime
+ * has no import map and the manifest declares nothing, so the package fails on its own first
+ * import. Every entry has to become a real npm dependency, and each of the three specifier
+ * kinds becomes one differently.
+ *
+ * - **`npm:pkg@range`** is already an npm package. The specifier becomes `pkg` and the range
+ *   is the version.
+ * - **`jsr:@scope/name@range`** resolves through jsr's own npm-compatible registry, where it
+ *   is published as `@jsr/scope__name`. That naming is jsr's, not a convention invented here,
+ *   and it is why a `.npmrc` pointing the `@jsr` scope at `npm.jsr.io` travels with the
+ *   package.
+ * - **A relative or absolute path** is a file in the project and needs no dependency.
+ *
+ * `alreadyMapped` names the specifiers something else has already rewritten, usually to a
+ * built-in like `node:path`. Those are skipped: a dependency declared for a specifier nothing
+ * imports any more is an install of something unused, and for `bun:test` it is an install of
+ * something that does not exist.
+ *
+ * @example
+ * ```ts
+ * deriveDependencies(
+ *   { "@hiisi/onlywhen": "jsr:@hiisi/onlywhen@^0.5.0", "chalk": "npm:chalk@^5" },
+ *   new Set(),
+ * );
+ * // mappings: { "@hiisi/onlywhen": "@jsr/hiisi__onlywhen", chalk: "chalk" }
+ * // dependencies: { "@jsr/hiisi__onlywhen": "^0.5.0", chalk: "^5" }
+ * // needsJsrRegistry: true
+ * ```
+ */
+export function deriveDependencies(
+  imports: Readonly<Record<string, unknown>>,
+  alreadyMapped: ReadonlySet<string> = new Set(),
+): DerivedDependencies {
+  const mappings: Record<string, string> = {};
+  const dependencies: Record<string, string> = {};
+  let needsJsrRegistry = false;
+
+  for (const [specifier, target] of Object.entries(imports)) {
+    if (typeof target !== "string") continue;
+    if (alreadyMapped.has(specifier)) continue;
+
+    if (target.startsWith("jsr:")) {
+      const parsed = splitVersion(target.slice("jsr:".length));
+      if (parsed === undefined) continue;
+      const npmName = jsrToNpmName(parsed.name);
+      if (npmName === undefined) continue;
+      mappings[specifier] = npmName;
+      dependencies[npmName] = parsed.range ?? "*";
+      needsJsrRegistry = true;
+      continue;
+    }
+
+    if (target.startsWith("npm:")) {
+      const parsed = splitVersion(target.slice("npm:".length));
+      if (parsed === undefined) continue;
+      mappings[specifier] = parsed.name;
+      dependencies[parsed.name] = parsed.range ?? "*";
+    }
+
+    // Anything else is a path into the project, or a protocol npm has no answer for. Left
+    // alone rather than guessed at: a wrong dependency is worse than a missing one, because
+    // it installs and then shadows the thing it was meant to be.
+  }
+
+  return { mappings, dependencies, needsJsrRegistry };
+}
+
+/**
+ * A jsr package name as npm spells it on jsr's compatibility registry.
+ *
+ * `@hiisi/onlywhen` becomes `@jsr/hiisi__onlywhen`. Returns undefined for anything that is
+ * not scoped, because jsr has no unscoped packages and a name that looks like one is a
+ * malformed specifier rather than a case to handle.
+ */
+export function jsrToNpmName(jsrName: string): string | undefined {
+  const match = /^@([^/]+)\/(.+)$/.exec(jsrName);
+  if (match === null) return undefined;
+  return `@jsr/${match[1]}__${match[2]}`;
+}
+
+/**
+ * A package specifier split into its name and its version range.
+ *
+ * The `@` that separates them is the last one, and only when it is not the scope's, which is
+ * why this is not a `split("@")`.
+ */
+function splitVersion(
+  specifier: string,
+): { name: string; range?: string } | undefined {
+  if (specifier === "") return undefined;
+  const at = specifier.lastIndexOf("@");
+  if (at <= 0) return { name: specifier };
+  return { name: specifier.slice(0, at), range: specifier.slice(at + 1) };
+}

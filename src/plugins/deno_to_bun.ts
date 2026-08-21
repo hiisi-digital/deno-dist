@@ -12,12 +12,14 @@ import {
   createTimer,
   DEFAULT_COPY_FILES,
   DEFAULT_ENTRY_POINT,
+  deriveDependencies,
   ensureDirectory,
   escapeRegex,
   failureResult,
   getPackageMetadata,
   getPackageName,
   getPackageVersion,
+  JSR_NPM_REGISTRY,
   runCommand,
   successResult,
   transformFiles,
@@ -158,7 +160,18 @@ const denoToBunPlugin: Plugin = {
     context.log.info("Transforming Deno code for Bun runtime...");
 
     const options = context.pluginConfig.options as DenoToBunOptions | undefined;
-    const mappings = { ...DEFAULT_MAPPINGS, ...options?.mappings };
+    const explicit = { ...DEFAULT_MAPPINGS, ...options?.mappings };
+
+    // Everything the source config imports becomes a real npm dependency, because the built
+    // package has no import map and would otherwise fail on its own first import. The
+    // explicit mappings win: those specifiers have been rewritten to a built-in, so
+    // declaring a dependency for them would install something nothing imports.
+    const configImports = context.variables.config["imports"];
+    const derived = deriveDependencies(
+      (configImports ?? {}) as Record<string, unknown>,
+      new Set(Object.keys(explicit)),
+    );
+    const mappings = { ...explicit, ...derived.mappings };
 
     // Create output directory
     await ensureDirectory(context.outputDir);
@@ -183,11 +196,22 @@ const denoToBunPlugin: Plugin = {
 
     // Generate package.json if requested
     if (options?.generatePackageJson !== false) {
-      const packageJson = generatePackageJson(context, options);
+      const packageJson = generatePackageJson(context, options, derived.dependencies);
       const packageJsonPath = `${context.outputDir}/package.json`;
       await Deno.writeTextFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
       affectedFiles.push(packageJsonPath);
       context.log.debug("Generated package.json");
+
+      // A jsr dependency is installable only from jsr's own npm-compatible registry, so the
+      // scope has to be pointed at it. Shipping the .npmrc with the package is what makes
+      // `bun install` and `npm install` work in the output directory without the consumer
+      // knowing where the dependency came from.
+      if (derived.needsJsrRegistry) {
+        const npmrcPath = `${context.outputDir}/.npmrc`;
+        await Deno.writeTextFile(npmrcPath, `@jsr:registry=${JSR_NPM_REGISTRY}\n`);
+        affectedFiles.push(npmrcPath);
+        context.log.debug("Generated .npmrc for the @jsr scope");
+      }
     }
 
     // Copy additional files
@@ -349,6 +373,7 @@ function buildBundleArgs(
 function generatePackageJson(
   context: PluginContext,
   options: DenoToBunOptions | undefined,
+  dependencies: Readonly<Record<string, string>> = {},
 ): Record<string, unknown> {
   const name = getPackageName(context);
   const version = getPackageVersion(context);
@@ -372,6 +397,7 @@ function generatePackageJson(
         default: `./${entry}`,
       },
     },
+    ...(Object.keys(dependencies).length > 0 ? { dependencies } : {}),
     scripts: { test: "bun test" },
     engines: { bun: ">=1.0.0" },
   };
