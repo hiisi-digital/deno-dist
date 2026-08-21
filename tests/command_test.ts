@@ -27,6 +27,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 
 import { binOf, makeRunnable, SHEBANG } from "../src/plugins/utils.ts";
+import { DNT_VERSION } from "../src/plugins/deno_to_node.ts";
 
 const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const FIXTURE_DIR = join(REPO_ROOT, "tests", "fixtures", "command");
@@ -173,6 +174,16 @@ Deno.test("a built command installs and runs as a command", async (t) => {
         await run(Deno.execPath(), ["run", "-A", CLI, "build", "--all"], project),
         "build --all",
       );
+    });
+
+    await t.step("the build pins its own dnt, whatever the project's lock says", async () => {
+      // The fixture ships a lock pinning dnt 0.41.3, which is the situation a
+      // real package here was in. A bare `jsr:@deno/dnt` resolves against that
+      // lock, so the tool's output depended on a file the tool does not own, and
+      // 0.41.3 translates `import.meta.main` into a comparison that is false for
+      // every installed command: the command ran, printed nothing, exited zero.
+      const manifest = await readJson(join(targets.node, "package.json"));
+      assertEquals(manifest["_generatedBy"], `dnt@${DNT_VERSION}`);
     });
 
     await t.step("each manifest declares the command", async () => {

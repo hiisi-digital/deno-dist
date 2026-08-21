@@ -95,6 +95,23 @@ export interface DenoToNodeShims {
 // Constants
 // =============================================================================
 
+/**
+ * The dnt this tool builds with.
+ *
+ * Pinned rather than bare, because a bare `jsr:@deno/dnt` resolves against the
+ * lockfile of the project being built, which is not a thing this tool controls
+ * and not a thing the person running it is thinking about. Two packages built by
+ * the same command on the same machine came out different: one project's lock
+ * held 0.41.3, whose translation of `import.meta.main` compares `import.meta.url`
+ * against a raw `process.argv[1]` and is therefore false for every installed
+ * command, and a project with no lock got 0.43.2, whose ponyfill is correct. The
+ * first produced a command that ran, printed nothing and exited zero.
+ *
+ * So the build tool decides its own build tool's version. Raising this is a
+ * deliberate act with a rebuild behind it, which is what a pin is for.
+ */
+export const DNT_VERSION = "0.43.2";
+
 const DNT_BUILD_SCRIPT_NAME = "_dnt_build.ts";
 
 // =============================================================================
@@ -255,6 +272,7 @@ const denoToNodePlugin: Plugin = {
       return failureResult(unbuilt, timer.elapsed());
     }
     affectedFiles.push(...runnable.map((r) => r.path));
+
     for (const entry of runnable) {
       if ("path" in entry) affectedFiles.push(entry.path);
     }
@@ -375,7 +393,7 @@ function generateBuildScript(options: {
   const mappingsLine = options.mappings ? `  mappings: ${JSON.stringify(options.mappings)},` : "";
 
   return `// Auto-generated dnt build script
-import { build, emptyDir } from "jsr:@deno/dnt";
+import { build, emptyDir } from "jsr:@deno/dnt@${DNT_VERSION}";
 
 await emptyDir(${safeOutputDir});
 

@@ -510,10 +510,10 @@ const helpCommand: CliCommand = {
   description: "Show help message",
   aliases: ["h"],
 
-  async handler(_args: CliArgs): Promise<number> {
+  handler(_args: CliArgs): Promise<number> {
     const version = getVersion();
     logger.log(createHelpText(version));
-    return 0;
+    return Promise.resolve(0);
   },
 };
 
@@ -525,10 +525,10 @@ const versionCommand: CliCommand = {
   description: "Show version",
   aliases: [],
 
-  async handler(_args: CliArgs): Promise<number> {
+  handler(_args: CliArgs): Promise<number> {
     const version = getVersion();
     logger.log(`${PROGRAM_NAME} v${version}`);
-    return 0;
+    return Promise.resolve(0);
   },
 };
 
