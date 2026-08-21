@@ -793,3 +793,81 @@ function splitVersion(
   if (at <= 0) return { name: specifier };
   return { name: specifier.slice(0, at), range: specifier.slice(at + 1) };
 }
+
+// =============================================================================
+// Entry points
+// =============================================================================
+
+/** One export a package offers, as the subpath it is reached by and the file behind it. */
+export interface EntryPoint {
+  /** The subpath, `"."` for the root export. */
+  readonly name: string;
+  /** The file, relative to the package root. */
+  readonly path: string;
+}
+
+/**
+ * Every export a source config declares.
+ *
+ * A Deno config spells `exports` either as a string, meaning the package has one entry, or as
+ * a map from subpath to file. Both become the same list here, with `"."` naming the root, so
+ * a caller does not have to know which form it was written in.
+ *
+ * This exists because a distribution built from the first entry only is not the package: a
+ * consumer doing `import { x } from "pkg/cli"` gets a resolution failure, and the failure is
+ * invisible from the output directory, where the root export works perfectly.
+ *
+ * @param config - The source config, usually `deno.json`.
+ * @param fallback - The entry to assume when the config declares none.
+ *
+ * @example
+ * ```ts
+ * entryPointsOf({ exports: { ".": "./mod.ts", "./cli": "./src/cli.ts" } });
+ * // [{ name: ".", path: "./mod.ts" }, { name: "./cli", path: "./src/cli.ts" }]
+ * ```
+ */
+export function entryPointsOf(
+  config: Readonly<Record<string, unknown>>,
+  fallback = "./mod.ts",
+): EntryPoint[] {
+  const exports = config["exports"];
+
+  if (typeof exports === "string") {
+    return [{ name: ".", path: exports }];
+  }
+
+  if (exports !== null && typeof exports === "object") {
+    const entries: EntryPoint[] = [];
+    for (const [name, path] of Object.entries(exports as Record<string, unknown>)) {
+      if (typeof path !== "string") continue;
+      // A non-JavaScript export, a JSON schema for instance, is reachable in Deno and is not
+      // an entry point a bundler can compile. Carried through as a file rather than built.
+      if (!/\.[cm]?[jt]sx?$/.test(path)) continue;
+      entries.push({ name, path });
+    }
+    // The root first, because dnt names the first entry `"."` regardless of what it was
+    // called, so an ordering that puts a subpath there silently renames it.
+    entries.sort((a, b) => (a.name === "." ? -1 : b.name === "." ? 1 : 0));
+    if (entries.length > 0) return entries;
+  }
+
+  return [{ name: ".", path: fallback }];
+}
+
+/**
+ * An npm `exports` map for a set of entry points.
+ *
+ * `.ts` sources keep their extension, because bun and deno both execute TypeScript directly
+ * and a distribution that ships sources is resolved against those. A caller that compiles
+ * first passes the compiled paths in.
+ */
+export function npmExportsOf(
+  entries: readonly EntryPoint[],
+): Record<string, { types: string; default: string }> {
+  const map: Record<string, { types: string; default: string }> = {};
+  for (const entry of entries) {
+    const path = entry.path.startsWith("./") ? entry.path : `./${entry.path}`;
+    map[entry.name] = { types: path, default: path };
+  }
+  return map;
+}
