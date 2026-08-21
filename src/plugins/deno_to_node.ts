@@ -7,6 +7,7 @@
 
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
 import {
+  binOf,
   createTimer,
   DEFAULT_COPY_FILES,
   DEFAULT_ENTRY_POINT,
@@ -16,8 +17,10 @@ import {
   getPackageMetadata,
   getPackageName,
   getPackageVersion,
+  makeRunnable,
   runDenoScript,
   selfImportsOf,
+  SHEBANG,
   successResult,
   tryCopyFile,
 } from "./utils.ts";
@@ -167,6 +170,14 @@ const denoToNodePlugin: Plugin = {
     const packageName = options?.packageName ?? getPackageName(context);
     const packageVersion = options?.packageVersion ?? getPackageVersion(context);
 
+    // dnt compiles, so a declared command has to point at what it emitted rather
+    // than at the source the config named. Both module systems are emitted when
+    // asked for, and the entry goes to the ES module one whenever it exists: dnt
+    // drops a `{"type":"module"}` beside it, so node reads the file correctly
+    // whichever way the surrounding package is declared.
+    const compiledDir = (options?.esm ?? true) ? "esm" : "script";
+    const bin = binOf(context.variables.config, (path) => compiledPath(path, compiledDir));
+
     // Build the dnt script
     const buildScript = generateBuildScript({
       sourceDir: context.sourceDir,
@@ -182,6 +193,7 @@ const denoToNodePlugin: Plugin = {
         ...(Object.keys(selfImportsOf(context.variables.config)).length > 0
           ? { imports: selfImportsOf(context.variables.config) }
           : {}),
+        ...(Object.keys(bin).length > 0 ? { bin } : {}),
       },
       declaration: options?.declaration ?? "inline",
       esm: options?.esm ?? true,
@@ -219,6 +231,33 @@ const denoToNodePlugin: Plugin = {
 
     // Clean up temp script
     await cleanupTempScript(tempScriptPath);
+
+    // npm's own documentation is blunt about the consequence of skipping this:
+    // without the line "the scripts are started without the node executable".
+    // dnt does not write one, so it is written here, onto the file the manifest
+    // just claimed is a command.
+    const runnable = await Promise.all(
+      Object.entries(bin).map(async ([command, path]) => {
+        const onDisk = `${context.outputDir}/${path.replace(/^\.\//, "")}`;
+        try {
+          await makeRunnable(onDisk, SHEBANG["node"] ?? "");
+          return { path: onDisk, problem: null as string | null };
+        } catch (error) {
+          return {
+            path: onDisk,
+            problem: `bin "${command}" names ${path}, which dnt did not emit: ${String(error)}`,
+          };
+        }
+      }),
+    );
+    const unbuilt = runnable.find((r) => r.problem !== null)?.problem;
+    if (unbuilt !== undefined && unbuilt !== null) {
+      return failureResult(unbuilt, timer.elapsed());
+    }
+    affectedFiles.push(...runnable.map((r) => r.path));
+    for (const entry of runnable) {
+      if ("path" in entry) affectedFiles.push(entry.path);
+    }
 
     // Copy additional files if specified
     const filesToCopy = options?.copyFiles ?? DEFAULT_COPY_FILES;
@@ -375,6 +414,19 @@ for (const file of filesToCopy) {
   }
 }
 `;
+}
+
+/**
+ * Where dnt puts the compiled form of a source file.
+ *
+ * The output mirrors the source tree under one directory per module system, so
+ * `./src/cli.ts` becomes `./esm/src/cli.js`. Only the extension and the prefix
+ * move; the path in between is the one the source was written with, which is
+ * what makes the result predictable from the config alone.
+ */
+function compiledPath(sourcePath: string, dir: string): string {
+  const bare = sourcePath.startsWith("./") ? sourcePath.slice(2) : sourcePath;
+  return `./${dir}/${bare.replace(/\.[cm]?tsx?$/, ".js")}`;
 }
 
 /**

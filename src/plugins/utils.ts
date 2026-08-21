@@ -893,6 +893,109 @@ export function npmExportsOf(
 }
 
 /**
+ * The commands a package installs, with each path put where the distribution
+ * actually wrote it.
+ *
+ * A package that ships a command line tool declares it in its source config the
+ * way npm spells it, as `bin`: either a map from command name to file, or a bare
+ * string when the command is named after the package. Deno itself has no such
+ * field and ignores the key, so the declaration costs the source nothing and is
+ * read here.
+ *
+ * It cannot be inferred, and that is why it is declared. An export called
+ * `./cli` is a subpath a consumer imports; whether it is also a command, and
+ * what that command is called, is a separate fact. Deno's own installer guesses
+ * from the file stem and treats `cli` as generic, which is the guess the
+ * publishing discipline says to override with a name.
+ *
+ * `resolve` maps a source path to the built one: a compiled distribution passes
+ * the function that renames `./cli.ts` to `./esm/cli.js`, and one that ships the
+ * sources passes the identity.
+ */
+export function binOf(
+  config: Readonly<Record<string, unknown>>,
+  resolve: (sourcePath: string) => string,
+): Record<string, string> {
+  const declared = config["bin"];
+  const map: Record<string, string> = {};
+
+  if (typeof declared === "string" && declared.length > 0) {
+    // The bare form names the package. npm resolves it to the unscoped half, so
+    // `@hiisi/otso` installs a command called `otso` rather than one nobody can
+    // type.
+    const name = typeof config["name"] === "string" ? config["name"] : "";
+    const command = name.startsWith("@") ? name.slice(name.indexOf("/") + 1) : name;
+    if (command.length > 0) map[command] = resolve(declared);
+    return map;
+  }
+
+  if (declared !== null && typeof declared === "object") {
+    for (const [command, path] of Object.entries(declared as Record<string, unknown>)) {
+      if (typeof path !== "string" || path.length === 0) continue;
+      map[command] = resolve(path);
+    }
+  }
+
+  return map;
+}
+
+/**
+ * The first line a command's entry point needs, per runtime.
+ *
+ * npm's own documentation is blunt about this: without it "the scripts are
+ * started without the node executable", which is a package that installs
+ * cleanly and then does nothing. It cannot come from the source, because the
+ * line names the runtime and one source builds three distributions.
+ *
+ * Deno's is the `-S` form, which is what lets a single `env` argument carry the
+ * subcommand and its flags. Deno installs a command from an export rather than
+ * from a manifest field, so this one matters only for a file run directly.
+ */
+export const SHEBANG: Readonly<Record<string, string>> = {
+  node: "#!/usr/bin/env node",
+  bun: "#!/usr/bin/env bun",
+  deno: "#!/usr/bin/env -S deno run -A",
+};
+
+/**
+ * Turn a built file into something a shell can execute: the right first line,
+ * and the mode bit that lets the kernel read it.
+ *
+ * Both, in one call, because they are one requirement and splitting them is how
+ * the second gets forgotten. It was: with the shebang alone, `npm install`
+ * produced a working command and `bun install` produced `Permission denied`.
+ * npm copies the package and chmods whatever `bin` names, so it repairs the
+ * omission on the way in; bun's `file:` install symlinks straight through to the
+ * built tree, so the mode is whatever the build left, and the build left `644`.
+ * A package that works under one installer and not the other is the shape that
+ * ships, because whoever wrote it tested under the one that repairs it.
+ *
+ * The shebang replaces whatever was there rather than being prepended to it. A
+ * source that carries one has it for whichever runtime its author ran it under,
+ * and two is a syntax error in the worst available position: the second is read
+ * as a private-field declaration at the top level.
+ *
+ * Throws when the file is not there. A `bin` naming a path that was never built
+ * produces a package that installs and leaves a broken command on the PATH, so
+ * the caller wants to hear about it rather than ship it.
+ */
+export async function makeRunnable(path: string, line: string): Promise<void> {
+  const text = await Deno.readTextFile(path);
+  // A file that is nothing but a shebang has no newline to cut at, and
+  // `indexOf` reporting -1 there would leave the old line in place and put the
+  // new one above it. Explicit rather than arithmetic on a sentinel.
+  const firstBreak = text.indexOf("\n");
+  const body = !text.startsWith("#!") ? text : firstBreak === -1 ? "" : text.slice(firstBreak + 1);
+  await Deno.writeTextFile(path, `${line}\n${body}`);
+  // Windows has no mode bits and `chmod` throws there rather than doing
+  // nothing, so the platform decides whether this step exists at all. A package
+  // built on Windows and installed on a unix by npm still works, because npm
+  // sets the bit itself; the one it would not survive is bun's symlink, and
+  // that combination has no unix on either end.
+  if (Deno.build.os !== "windows") await Deno.chmod(path, 0o755);
+}
+
+/**
  * Every bare specifier the given sources import.
  *
  * A bare specifier is one that is neither a path nor a protocol: `@hiisi/onlywhen` rather

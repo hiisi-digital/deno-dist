@@ -22,6 +22,8 @@ import type { CliArgs, CliCommand, DistConfig, PipelineOptions } from "./types.t
 // Constants
 // =============================================================================
 
+import { VERSION } from "./version.ts";
+
 const PROGRAM_NAME = "deno-dist";
 
 // =============================================================================
@@ -29,18 +31,14 @@ const PROGRAM_NAME = "deno-dist";
 // =============================================================================
 
 /**
- * Get the package version from deno.json.
- * Falls back to "0.0.0" if not readable.
+ * The version this build reports.
+ *
+ * Re-exported from the one place that holds it, so `--version` says the same
+ * thing whether the CLI was run from a clone, installed from jsr, or built into
+ * a distribution. See `src/version.ts` for why it is not read from the config.
  */
-async function getVersion(): Promise<string> {
-  try {
-    const moduleUrl = new URL("../deno.json", import.meta.url);
-    const content = await Deno.readTextFile(moduleUrl);
-    const config = JSON.parse(content) as { version?: string };
-    return config.version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
+function getVersion(): string {
+  return VERSION;
 }
 
 // =============================================================================
@@ -513,7 +511,7 @@ const helpCommand: CliCommand = {
   aliases: ["h"],
 
   async handler(_args: CliArgs): Promise<number> {
-    const version = await getVersion();
+    const version = getVersion();
     logger.log(createHelpText(version));
     return 0;
   },
@@ -528,7 +526,7 @@ const versionCommand: CliCommand = {
   aliases: [],
 
   async handler(_args: CliArgs): Promise<number> {
-    const version = await getVersion();
+    const version = getVersion();
     logger.log(`${PROGRAM_NAME} v${version}`);
     return 0;
   },

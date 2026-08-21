@@ -127,11 +127,48 @@ deno-dist validate
 
 ### Root-level fields
 
-| Field      | Type     | Default    | Description                            |
-| ---------- | -------- | ---------- | -------------------------------------- |
-| `distDir`  | `string` | `"target"` | Output directory for all distributions |
-| `dist`     | `object` | `{}`       | Named distribution configurations      |
-| `metadata` | `object` | `{}`       | Package metadata including dist config |
+| Field      | Type               | Default    | Description                                   |
+| ---------- | ------------------ | ---------- | --------------------------------------------- |
+| `distDir`  | `string`           | `"target"` | Output directory for all distributions        |
+| `dist`     | `object`           | `{}`       | Named distribution configurations             |
+| `metadata` | `object`           | `{}`       | Package metadata including dist config        |
+| `bin`      | `object \| string` | none       | Commands the package installs, npm's spelling |
+
+### Shipping a command line tool
+
+A package that is a tool as well as a library declares its commands with `bin`,
+the same field npm reads, mapping a command name to the source file behind it.
+Deno has no such field and ignores the key, so the declaration costs the source
+nothing.
+
+```json
+{
+  "name": "@scope/thing",
+  "exports": { ".": "./mod.ts", "./cli": "./cli.ts" },
+  "bin": { "thing": "./cli.ts" }
+}
+```
+
+Each distribution then gets the entry pointing where that build actually put the
+file, the first line naming the runtime that will run it, and the mode bit that
+lets a shell execute it. So the npm package's entry is the compiled `./esm/cli.js`
+under `#!/usr/bin/env node`, and bun's is the source `./cli.ts` under
+`#!/usr/bin/env bun`.
+
+Write no shebang in the source. One source builds three distributions and the
+line differs in each, so any line written there is wrong for at least two of
+them; a build replaces whatever it finds rather than stacking a second one on
+top.
+
+The bare string form works too, and installs a command named after the package
+with its scope dropped: `"bin": "./cli.ts"` on `@scope/thing` installs `thing`.
+
+Deno is the exception and needs nothing here, because `deno install` takes an
+export rather than a manifest field:
+
+```bash
+deno install --global --name thing jsr:@scope/thing/cli
+```
 
 ### Distribution fields
 
