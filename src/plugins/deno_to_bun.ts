@@ -20,6 +20,7 @@ import {
   getPackageMetadata,
   getPackageName,
   getPackageVersion,
+  importedSpecifiers,
   JSR_NPM_REGISTRY,
   npmExportsOf,
   runCommand,
@@ -77,9 +78,13 @@ export interface DenoToBunOptions {
  * Default import mappings from Deno to Bun/Node equivalents.
  */
 const DEFAULT_MAPPINGS: Readonly<Record<string, string>> = {
-  "jsr:@std/assert": "bun:test",
-  "jsr:@std/path": "node:path",
-  "jsr:@std/fs": "node:fs/promises",
+  // Keyed the way source imports them, which is the import map's key rather than the `jsr:`
+  // target it points at. An earlier version keyed on `jsr:@std/path`, a form no import
+  // statement contains, so none of these ever matched anything and all three were inert.
+  "@std/assert": "bun:test",
+  "@std/path": "node:path",
+  "@std/fs": "node:fs/promises",
+  "@std/testing": "bun:test",
 };
 
 // =============================================================================
@@ -164,16 +169,10 @@ const denoToBunPlugin: Plugin = {
     const options = context.pluginConfig.options as DenoToBunOptions | undefined;
     const explicit = { ...DEFAULT_MAPPINGS, ...options?.mappings };
 
-    // Everything the source config imports becomes a real npm dependency, because the built
-    // package has no import map and would otherwise fail on its own first import. The
-    // explicit mappings win: those specifiers have been rewritten to a built-in, so
-    // declaring a dependency for them would install something nothing imports.
-    const configImports = context.variables.config["imports"];
-    const derived = deriveDependencies(
-      (configImports ?? {}) as Record<string, unknown>,
-      new Set(Object.keys(explicit)),
-    );
-    const mappings = { ...explicit, ...derived.mappings };
+    const configImports = (context.variables.config["imports"] ?? {}) as Record<
+      string,
+      unknown
+    >;
 
     // Create output directory
     await ensureDirectory(context.outputDir);
@@ -184,6 +183,19 @@ const denoToBunPlugin: Plugin = {
       includeTests: false,
       includeAssets: false,
     });
+
+    // What the shipped files actually import decides the dependencies, rather than the whole
+    // import map. The map is the project's and includes its tests, which are not shipped, so
+    // declaring from it makes an install fetch something unused and for a test-only jsr
+    // package makes it fail outright: `@std/assert` has no npm publication under its own name.
+    const sources = await Promise.all(
+      files.map((file) => Deno.readTextFile(file).catch(() => "")),
+    );
+    const derived = deriveDependencies(configImports, {
+      alreadyMapped: new Set(Object.keys(explicit)),
+      used: importedSpecifiers(sources),
+    });
+    const mappings = { ...explicit, ...derived.mappings };
 
     // Transform all files using the shared utility
     const transformer = createBunTransformer(mappings);

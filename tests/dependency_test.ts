@@ -14,9 +14,9 @@
  * `@jsr` scope at that registry.
  */
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
-import { deriveDependencies, jsrToNpmName } from "../src/plugins/utils.ts";
+import { deriveDependencies, importedSpecifiers, jsrToNpmName } from "../src/plugins/utils.ts";
 
 const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const FIXTURE = join(REPO_ROOT, "tests", "fixtures", "dependent");
@@ -58,7 +58,7 @@ Deno.test("an already-mapped specifier gets no dependency", () => {
   // that does not exist on npm at all.
   const derived = deriveDependencies(
     { "@std/path": "jsr:@std/path@^1.0.0", "@hiisi/onlywhen": "jsr:@hiisi/onlywhen@^0.5.0" },
-    new Set(["@std/path"]),
+    { alreadyMapped: new Set(["@std/path"]) },
   );
   assertEquals(Object.keys(derived.dependencies), ["@jsr/hiisi__onlywhen"]);
   assertEquals(derived.mappings["@std/path"], undefined);
@@ -195,3 +195,52 @@ async function copyTree(from: string, to: string): Promise<void> {
     }
   }
 }
+
+Deno.test("only specifiers the shipped files import become dependencies", () => {
+  // An import map is the whole project's and includes its tests, which are not shipped.
+  // Declaring from it makes an install fetch something unused, and for a test-only jsr
+  // package it makes the install fail outright: `@std/assert` has no npm publication under
+  // its own name, so `@jsr/std__assert` is a 404 and `bun install` refuses the whole package.
+  const imports = {
+    "@hiisi/onlywhen": "jsr:@hiisi/onlywhen@^0.5.0",
+    "@std/assert": "jsr:@std/assert@^1.0.0",
+    "@std/testing": "jsr:@std/testing@^1.0.0",
+  };
+  const used = new Set(["@hiisi/onlywhen"]);
+
+  assertEquals(
+    Object.keys(deriveDependencies(imports, { used }).dependencies),
+    ["@jsr/hiisi__onlywhen"],
+  );
+  // The control: with no `used` set the old behaviour is what happens, so the test above is
+  // about the filter rather than about the input happening to contain one entry.
+  assertEquals(Object.keys(deriveDependencies(imports).dependencies).length, 3);
+});
+
+Deno.test("importedSpecifiers finds the bare ones and nothing else", () => {
+  const found = importedSpecifiers([
+    'import { a } from "@hiisi/onlywhen";',
+    'import "./local.ts";',
+    'import { b } from "node:fs";',
+    'const c = await import("chalk");',
+    'export { d } from "@scope/pkg/sub";',
+    'import e from "pkg/deep/path";',
+  ]);
+  assert(found.has("@hiisi/onlywhen"));
+  assert(found.has("chalk"));
+  // A subpath import resolves through the package it names, so both forms are recorded and
+  // an import map keyed on either matches.
+  assert(found.has("@scope/pkg/sub"));
+  assert(found.has("@scope/pkg"));
+  assert(found.has("pkg"));
+  // A path is not a dependency, and a protocol specifier resolves without one.
+  assertFalse(found.has("./local.ts"));
+  assertFalse(found.has("node:fs"));
+});
+
+Deno.test("a file importing nothing bare yields no specifiers", () => {
+  // Without this, `importedSpecifiers` returning a fixed non-empty set satisfies every
+  // assertion above.
+  assertEquals(importedSpecifiers(['import "./a.ts";\nconst x = 1;']).size, 0);
+  assertEquals(importedSpecifiers([]).size, 0);
+});
