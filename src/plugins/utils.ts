@@ -14,7 +14,6 @@ import {
   isAlreadyExists,
   isPermissionDenied,
   mkdirp,
-  platform,
   readDir,
   readText,
   run,
@@ -1082,12 +1081,17 @@ export async function makeRunnable(path: string, line: string): Promise<void> {
   const firstBreak = text.indexOf("\n");
   const body = !text.startsWith("#!") ? text : firstBreak === -1 ? "" : text.slice(firstBreak + 1);
   await writeText(path, `${line}\n${body}`);
-  // Windows has no mode bits and `chmod` throws there rather than doing
-  // nothing, so the platform decides whether this step exists at all. A package
-  // built on Windows and installed on a unix by npm still works, because npm
-  // sets the bit itself; the one it would not survive is bun's symlink, and
-  // that combination has no unix on either end.
-  if (platform() !== "windows") await chmod(path, 0o755);
+  // Windows has no mode bits, and `chmod` is a no-op there rather than a
+  // throw, so this is unconditional. An earlier version guarded it with
+  // `platform() !== "windows"` against a `platform()` that answered node's
+  // `win32`: the condition was true on every platform including windows, so
+  // the guard did nothing, and the comment above it claimed a throw that does
+  // not happen. Two wrongs cancelling is not a reason to keep either.
+  //
+  // A package built on windows and installed on a unix by npm still works,
+  // because npm sets the bit itself. The one that would not survive is bun's
+  // symlink, and that combination has no unix on either end.
+  await chmod(path, 0o755);
 }
 
 /**
