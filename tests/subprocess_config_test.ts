@@ -15,7 +15,7 @@
  */
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { dirname, fromFileUrl, join } from "@std/path";
+import { dirname, fromFileUrl } from "@std/path";
 
 import { cliArgs } from "./_cli.ts";
 
