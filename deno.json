@@ -137,5 +137,10 @@
         "deno-to-bun"
       ]
     }
-  }
+  },
+  "links": [
+    "../shimp",
+    "../onlywhen",
+    "../tgts"
+  ]
 }
