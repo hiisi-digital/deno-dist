@@ -621,10 +621,16 @@ export async function runCommand(options: RunCommandOptions): Promise<CommandRes
 export function runDenoScript(
   scriptPath: string,
   cwd?: string,
+  configPath?: string,
 ): Promise<CommandResult> {
+  // A subprocess resolves its own config from its working directory and cannot
+  // inherit the one its parent was started with. That is invisible until a
+  // project depends on something unpublished, at which point the generated
+  // script fails to resolve a specifier the project itself resolves fine.
+  const config = configPath === undefined ? [] : ["-c", configPath];
   return runCommand({
     command: "deno",
-    args: ["run", "-A", scriptPath],
+    args: ["run", "-A", ...config, scriptPath],
     cwd,
   });
 }

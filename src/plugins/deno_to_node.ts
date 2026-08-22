@@ -63,6 +63,16 @@ export interface DenoToNodeOptions {
   readonly declaration?: "inline" | "separate" | false;
   /** Whether to generate ESM output (default: true) */
   readonly esm?: boolean;
+  /**
+   * A config file for the generated dnt script to build under.
+   *
+   * The script runs as a subprocess and resolves its own config from the source
+   * directory, so it cannot see the one this tool was started with. Name one
+   * here when the project's specifiers only resolve under a particular config,
+   * which is the case while a dependency is unpublished and reached through
+   * `links`. Relative to the source directory.
+   */
+  readonly denoConfig?: string;
   /** Whether to generate CJS output (default: true) */
   readonly cjs?: boolean;
   /** Test file patterns to include */
@@ -215,6 +225,11 @@ const denoToNodePlugin: Plugin = {
         ...(Object.keys(bin).length > 0 ? { bin } : {}),
       },
       compilerOptions: dntCompilerOptions(context.variables.config),
+      // Absolute, because the generated script's own resolution base is not
+      // something this can rely on being the source directory.
+      denoConfig: options?.denoConfig === undefined
+        ? undefined
+        : `${context.sourceDir}/${options.denoConfig}`,
       declaration: options?.declaration ?? "inline",
       esm: options?.esm ?? true,
       cjs: options?.cjs ?? true,
@@ -234,7 +249,11 @@ const denoToNodePlugin: Plugin = {
     context.log.debug(`Build script written to: ${tempScriptPath}`);
 
     // Run the build script
-    const runResult = await runDenoScript(tempScriptPath, context.sourceDir);
+    const runResult = await runDenoScript(
+      tempScriptPath,
+      context.sourceDir,
+      options?.denoConfig,
+    );
     if (!runResult.success) {
       return failureResult(
         `dnt build failed: ${runResult.stderr ?? runResult.error}`,
@@ -351,6 +370,7 @@ function generateBuildScript(options: {
   declaration: "inline" | "separate" | false;
   esm: boolean;
   compilerOptions: Record<string, unknown>;
+  denoConfig?: string;
   cjs: boolean;
   test: boolean;
   shims?: DenoToNodeShims;
@@ -392,6 +412,23 @@ function generateBuildScript(options: {
   // Build mappings if provided
   const mappingsLine = options.mappings ? `  mappings: ${JSON.stringify(options.mappings)},` : "";
 
+  // dnt resolves the module graph itself rather than through the deno CLI, so
+  // `-c` on the subprocess does not reach it and neither does `links`. Its own
+  // `importMap` option is the way in, and a deno config with an `imports` block
+  // is a valid import map.
+  //
+  // What this does not do, measured rather than assumed: it does not make a
+  // `jsr:` specifier resolve to a local path. dnt asks the registry for a jsr
+  // package regardless of the import map, the lockfile, `links`, or `-c`, so a
+  // package with an unpublished jsr dependency cannot be built for node at all.
+  // Its bun and deno distributions are unaffected, because neither goes through
+  // dnt. The order that follows is that a dependency publishes before its
+  // consumer can ship a node build, which is ordinary and worth knowing before
+  // planning a release rather than during one.
+  const importMapLine = options.denoConfig
+    ? `  importMap: ${JSON.stringify(options.denoConfig)},`
+    : "";
+
   return `// Auto-generated dnt build script
 import { build, emptyDir } from "jsr:@deno/dnt@${DNT_VERSION}";
 
@@ -411,6 +448,7 @@ await build({
     webSocket: ${shimsConfig.webSocket},
   },
   package: ${packageBlock},
+${importMapLine}
   compilerOptions: ${JSON.stringify(options.compilerOptions)},
   typeCheck: "both",
   declaration: ${JSON.stringify(options.declaration)},
