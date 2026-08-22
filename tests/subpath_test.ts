@@ -12,10 +12,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { entryPointsOf, npmExportsOf, selfImportsOf } from "../src/plugins/utils.ts";
+import { cliArgs } from "./_cli.ts";
 
 const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const FIXTURE = join(REPO_ROOT, "tests", "fixtures", "subpaths");
-const CLI = join(REPO_ROOT, "src", "cli.ts");
 
 Deno.test("a string exports field is one entry named for the root", () => {
   assertEquals(entryPointsOf({ exports: "./mod.ts" }), [{ name: ".", path: "./mod.ts" }]);
@@ -67,7 +67,7 @@ Deno.test("both distributions carry the subpath, and it imports", async (t) => {
 
     async function build(target: string): Promise<void> {
       const { success, stderr } = await new Deno.Command(Deno.execPath(), {
-        args: ["run", "-A", CLI, "build", target],
+        args: cliArgs("build", target),
         cwd: project,
         stdout: "piped",
         stderr: "piped",

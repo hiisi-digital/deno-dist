@@ -6,7 +6,10 @@
  * running setup, and publishing releases.
  */
 
-import { parseArgs } from "@std/cli";
+// The submodule rather than the barrel. `@std/cli` re-exports `promptSecret`,
+// which reaches for `Deno.stdin` and so does not compile for node: importing the
+// package by name drags it into the graph, and this tool builds itself for node.
+import { parseArgs } from "@std/cli/parse-args";
 import { loadDistConfig, validateConfig } from "./config.ts";
 import {
   type ExtendedPipelineOptions,
@@ -22,6 +25,9 @@ import type { CliArgs, CliCommand, DistConfig, PipelineOptions } from "./types.t
 // Constants
 // =============================================================================
 
+import { VERSION } from "./version.ts";
+
+import { args as processArgs, exit, readText } from "@hiisi/shimp";
 const PROGRAM_NAME = "deno-dist";
 
 // =============================================================================
@@ -29,18 +35,14 @@ const PROGRAM_NAME = "deno-dist";
 // =============================================================================
 
 /**
- * Get the package version from deno.json.
- * Falls back to "0.0.0" if not readable.
+ * The version this build reports.
+ *
+ * Re-exported from the one place that holds it, so `--version` says the same
+ * thing whether the CLI was run from a clone, installed from jsr, or built into
+ * a distribution. See `src/version.ts` for why it is not read from the config.
  */
-async function getVersion(): Promise<string> {
-  try {
-    const moduleUrl = new URL("../deno.json", import.meta.url);
-    const content = await Deno.readTextFile(moduleUrl);
-    const config = JSON.parse(content) as { version?: string };
-    return config.version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
+function getVersion(): string {
+  return VERSION;
 }
 
 // =============================================================================
@@ -396,7 +398,7 @@ const releaseCommand: CliCommand = {
     const notesPath = args.flags.notes;
     if (notesPath) {
       try {
-        releaseNotes = await Deno.readTextFile(notesPath);
+        releaseNotes = await readText(notesPath);
       } catch (error) {
         logger.error(`Failed to read release notes: ${String(error)}`);
         return 1;
@@ -512,10 +514,10 @@ const helpCommand: CliCommand = {
   description: "Show help message",
   aliases: ["h"],
 
-  async handler(_args: CliArgs): Promise<number> {
-    const version = await getVersion();
+  handler(_args: CliArgs): Promise<number> {
+    const version = getVersion();
     logger.log(createHelpText(version));
-    return 0;
+    return Promise.resolve(0);
   },
 };
 
@@ -527,10 +529,10 @@ const versionCommand: CliCommand = {
   description: "Show version",
   aliases: [],
 
-  async handler(_args: CliArgs): Promise<number> {
-    const version = await getVersion();
+  handler(_args: CliArgs): Promise<number> {
+    const version = getVersion();
     logger.log(`${PROGRAM_NAME} v${version}`);
-    return 0;
+    return Promise.resolve(0);
   },
 };
 
@@ -565,7 +567,7 @@ function findCommand(name: string): CliCommand | undefined {
  * Main CLI entry point.
  */
 async function main(): Promise<number> {
-  const args = parseCliArgs(Deno.args);
+  const args = parseCliArgs(processArgs());
 
   // Handle global flags
   if (args.flags.help) {
@@ -590,7 +592,7 @@ async function main(): Promise<number> {
 // Run CLI
 if (import.meta.main) {
   const exitCode = await main();
-  Deno.exit(exitCode);
+  exit(exitCode);
 }
 
 export { main, parseCliArgs };

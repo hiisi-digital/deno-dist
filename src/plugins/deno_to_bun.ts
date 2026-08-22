@@ -8,6 +8,7 @@
 
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
 import {
+  binOf,
   collectFiles,
   createTimer,
   DEFAULT_COPY_FILES,
@@ -22,14 +23,17 @@ import {
   getPackageVersion,
   importedSpecifiers,
   JSR_NPM_REGISTRY,
+  makeRunnable,
   npmExportsOf,
   runCommand,
   selfImportsOf,
+  SHEBANG,
   successResult,
   transformFiles,
   tryCopyFile,
 } from "./utils.ts";
 
+import { readText, stat, writeText } from "@hiisi/shimp";
 // =============================================================================
 // Plugin Metadata
 // =============================================================================
@@ -138,7 +142,7 @@ const denoToBunPlugin: Plugin = {
 
     // Validate entry point exists
     try {
-      await Deno.stat(fullEntryPath);
+      await stat(fullEntryPath);
     } catch {
       return failureResult(`Entry point not found: ${fullEntryPath}`, timer.elapsed());
     }
@@ -147,7 +151,7 @@ const denoToBunPlugin: Plugin = {
 
     // Warn about Deno-specific APIs that may need manual handling
     try {
-      const content = await Deno.readTextFile(fullEntryPath);
+      const content = await readText(fullEntryPath);
       if (content.includes("Deno.")) {
         warnings.push("Source uses Deno.* APIs. Some may not be available in Bun.");
       }
@@ -190,7 +194,7 @@ const denoToBunPlugin: Plugin = {
     // declaring from it makes an install fetch something unused and for a test-only jsr
     // package makes it fail outright: `@std/assert` has no npm publication under its own name.
     const sources = await Promise.all(
-      files.map((file) => Deno.readTextFile(file).catch(() => "")),
+      files.map((file) => readText(file).catch(() => "")),
     );
     const derived = deriveDependencies(configImports, {
       alreadyMapped: new Set(Object.keys(explicit)),
@@ -209,11 +213,39 @@ const denoToBunPlugin: Plugin = {
     });
     affectedFiles.push(...processedFiles);
 
+    // A command's entry point needs the first line naming the runtime that will
+    // run it. It cannot come from the source: one source builds three
+    // distributions and the line differs in each, so it is written per output.
+    // Failing here rather than warning, because the alternative is a package
+    // that installs cleanly and leaves a command on the PATH that does nothing.
+    const bin = binOf(context.variables.config, (path) => path);
+    const runnable = await Promise.all(
+      Object.entries(bin).map(async ([command, path]) => {
+        const onDisk = `${context.outputDir}/${path.replace(/^\.\//, "")}`;
+        try {
+          await makeRunnable(onDisk, SHEBANG["bun"] ?? "");
+          return { path: onDisk, problem: null as string | null };
+        } catch (error) {
+          return {
+            path: onDisk,
+            problem: `bin "${command}" names ${path}, which the build did not produce: ${
+              String(error)
+            }`,
+          };
+        }
+      }),
+    );
+    const unbuilt = runnable.find((r) => r.problem !== null)?.problem;
+    if (unbuilt !== undefined && unbuilt !== null) {
+      return failureResult(unbuilt, timer.elapsed());
+    }
+    affectedFiles.push(...runnable.map((r) => r.path));
+
     // Generate package.json if requested
     if (options?.generatePackageJson !== false) {
       const packageJson = generatePackageJson(context, options, derived.dependencies);
       const packageJsonPath = `${context.outputDir}/package.json`;
-      await Deno.writeTextFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
+      await writeText(packageJsonPath, JSON.stringify(packageJson, null, 2));
       affectedFiles.push(packageJsonPath);
       context.log.debug("Generated package.json");
 
@@ -223,7 +255,7 @@ const denoToBunPlugin: Plugin = {
       // knowing where the dependency came from.
       if (derived.needsJsrRegistry) {
         const npmrcPath = `${context.outputDir}/.npmrc`;
-        await Deno.writeTextFile(npmrcPath, `@jsr:registry=${JSR_NPM_REGISTRY}\n`);
+        await writeText(npmrcPath, `@jsr:registry=${JSR_NPM_REGISTRY}\n`);
         affectedFiles.push(npmrcPath);
         context.log.debug("Generated .npmrc for the @jsr scope");
       }
@@ -372,6 +404,19 @@ function buildBundleArgs(
 }
 
 /**
+ * A package-relative path in the form the manifest's other entries take.
+ *
+ * `exports` is written with the leading `./` and `main` without it, because npm
+ * requires the prefix in the first and accepts either in the second. `bin` is
+ * the second kind and is spelled like `exports` here, so a reader comparing the
+ * two sees one convention.
+ */
+function normalise(path: string): string {
+  const bare = path.startsWith("./") ? path.slice(2) : path;
+  return `./${bare}`;
+}
+
+/**
  * Generate package.json for the Bun output.
  *
  * The transform copies TypeScript sources; nothing here compiles anything.
@@ -412,6 +457,11 @@ function generatePackageJson(
     ? { ".": { types: `./${typesEntry}`, default: `./${entry}` } }
     : npmExportsOf(entryPointsOf(context.variables.config, entryPoint));
 
+  // Nothing compiles here, so a declared command points at the source file under
+  // the name it was written with. bun runs TypeScript directly, which is the
+  // whole reason this distribution ships sources.
+  const bin = binOf(context.variables.config, (path) => normalise(path));
+
   return {
     name,
     version,
@@ -421,6 +471,7 @@ function generatePackageJson(
     module: entry,
     types: typesEntry,
     exports,
+    ...(Object.keys(bin).length > 0 ? { bin } : {}),
     ...(Object.keys(selfImports).length > 0 ? { imports: selfImports } : {}),
     ...(Object.keys(dependencies).length > 0 ? { dependencies } : {}),
     scripts: { test: "bun test" },

@@ -1,0 +1,34 @@
+{
+  "name": "@hiisi/decorated-fixture",
+  "version": "0.1.0",
+  "description": "Fixture package whose sources use decorators, for the compilerOptions passthrough.",
+  "license": "MPL-2.0",
+  "exports": "./mod.ts",
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  },
+  "imports": {
+    "reflect-metadata": "npm:reflect-metadata@^0.2.2"
+  },
+  "distDir": "target",
+  "dist": {
+    "node": {
+      "runtime": "node",
+      "plugins": [
+        {
+          "id": "deno-to-node",
+          "options": {
+            "cjs": false
+          }
+        }
+      ]
+    },
+    "bun": {
+      "runtime": "bun",
+      "plugins": [
+        "deno-to-bun"
+      ]
+    }
+  }
+}

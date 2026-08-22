@@ -16,6 +16,7 @@
 import type { TemplateInsertionMode, TemplateMarker, TemplateVariables } from "./types.ts";
 import { TemplateError } from "./types.ts";
 
+import { env, isNotFound, readText } from "@hiisi/shimp";
 // =============================================================================
 // Types
 // =============================================================================
@@ -117,7 +118,7 @@ export function createVariablesFromContext(
     | undefined;
 
   return {
-    env: Deno.env.toObject(),
+    env: env(),
     config,
     captures: {},
     custom: { ...staticScope, ...scope },
@@ -509,10 +510,10 @@ export async function loadTemplate(
   variables: TemplateVariables,
 ): Promise<string> {
   try {
-    const content = await Deno.readTextFile(path);
+    const content = await readText(path);
     return resolveVariables(content, variables);
   } catch (error) {
-    if (error instanceof Deno.errors.NotFound) {
+    if (isNotFound(error)) {
       throw new TemplateError(`Template file not found: ${path}`);
     }
     throw new TemplateError(`Failed to load template: ${path} - ${String(error)}`);

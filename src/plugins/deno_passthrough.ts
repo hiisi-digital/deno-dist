@@ -21,6 +21,7 @@ import {
   tryCopyFile,
 } from "./utils.ts";
 
+import { copyFile, readText, stat, writeText } from "@hiisi/shimp";
 // =============================================================================
 // Plugin Metadata
 // =============================================================================
@@ -96,8 +97,8 @@ const denoPassthroughPlugin: Plugin = {
 
     // Validate source directory exists
     try {
-      const stat = await Deno.stat(context.sourceDir);
-      if (!stat.isDirectory) {
+      const info = await stat(context.sourceDir);
+      if (!info.isDirectory) {
         return failureResult(
           `Source path is not a directory: ${context.sourceDir}`,
           timer.elapsed(),
@@ -186,7 +187,7 @@ const denoPassthroughPlugin: Plugin = {
     // Try to run deno check on the output
     const modPath = `${context.outputDir}/mod.ts`;
     try {
-      await Deno.stat(modPath);
+      await stat(modPath);
     } catch {
       // No mod.ts, skip validation
       context.log.info("No mod.ts found, skipping type check");
@@ -238,7 +239,7 @@ async function processFile(
 
   // Check if this is a TypeScript file that needs transformation
   if (file.endsWith(".ts") || file.endsWith(".tsx")) {
-    let content = await Deno.readTextFile(file);
+    let content = await readText(file);
 
     // Strip comments if requested
     if (options.stripComments) {
@@ -251,10 +252,10 @@ async function processFile(
       content = content.replace(regex, transform.replacement);
     }
 
-    await Deno.writeTextFile(outputPath, content);
+    await writeText(outputPath, content);
   } else {
     // Copy non-TypeScript files directly
-    await Deno.copyFile(file, outputPath);
+    await copyFile(file, outputPath);
   }
 
   context.log.debug(`Copied: ${relativePath}`);
@@ -279,7 +280,7 @@ async function copyDenoConfig(context: PluginContext): Promise<string | null> {
   const contents = await Promise.all(
     candidates.map(async (path) => {
       try {
-        return await Deno.readTextFile(path);
+        return await readText(path);
       } catch {
         return null;
       }
@@ -297,7 +298,7 @@ async function copyDenoConfig(context: PluginContext): Promise<string | null> {
   delete config["dist"];
   delete config["distDir"];
   const destPath = `${context.outputDir}/deno.json`;
-  await Deno.writeTextFile(destPath, JSON.stringify(config, null, 2) + "\n");
+  await writeText(destPath, JSON.stringify(config, null, 2) + "\n");
   return destPath;
 }
 

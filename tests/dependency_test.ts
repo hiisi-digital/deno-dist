@@ -17,10 +17,10 @@
 import { assert, assertEquals, assertFalse, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { deriveDependencies, importedSpecifiers, jsrToNpmName } from "../src/plugins/utils.ts";
+import { cliArgs } from "./_cli.ts";
 
 const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const FIXTURE = join(REPO_ROOT, "tests", "fixtures", "dependent");
-const CLI = join(REPO_ROOT, "src", "cli.ts");
 
 Deno.test("a jsr name becomes the name jsr publishes it under on npm", () => {
   assertEquals(jsrToNpmName("@hiisi/onlywhen"), "@jsr/hiisi__onlywhen");
@@ -77,7 +77,7 @@ Deno.test("a built bun distribution installs and runs with its dependency", asyn
 
   await t.step("the CLI builds it", async () => {
     const { success, stderr } = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", CLI, "build", "bun"],
+      args: cliArgs("build", "bun"),
       cwd: project,
       stdout: "piped",
       stderr: "piped",

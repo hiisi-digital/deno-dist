@@ -8,6 +8,18 @@
 
 import type { PluginContext, PluginPhaseResult } from "../types.ts";
 
+import {
+  chmod,
+  copyFile as copyFileRaw,
+  isAlreadyExists,
+  isPermissionDenied,
+  mkdirp,
+  readDir,
+  readText,
+  run,
+  stat,
+  writeText,
+} from "@hiisi/shimp";
 // =============================================================================
 // Types
 // =============================================================================
@@ -91,7 +103,11 @@ export async function collectFiles(
     includeAssets,
   });
 
-  return files;
+  // Sorted, which it never was. The order came out of the filesystem's own
+  // enumeration, and it feeds transforms, manifests and dependency derivation,
+  // so the same source could produce differently-ordered output on two machines.
+  // Sorting also frees the walk to recurse in parallel.
+  return files.sort();
 }
 
 /**
@@ -109,8 +125,9 @@ async function collectFilesRecursive(
     includeAssets: boolean;
   },
 ): Promise<void> {
+  const subdirectories: string[] = [];
   try {
-    for await (const entry of Deno.readDir(dir)) {
+    for (const entry of await readDir(dir)) {
       const path = `${dir}/${entry.name}`;
 
       if (entry.isDirectory) {
@@ -122,7 +139,7 @@ async function collectFilesRecursive(
         if (options.exclude?.some((pattern) => matchGlob(entry.name, pattern))) {
           continue;
         }
-        await collectFilesRecursive(path, files, options);
+        subdirectories.push(path);
       } else if (entry.isFile) {
         // Skip test files if not including them
         if (!options.includeTests && isTestFile(entry.name)) {
@@ -152,10 +169,17 @@ async function collectFilesRecursive(
     }
   } catch (error) {
     // Silently skip directories we can't read
-    if (!(error instanceof Deno.errors.PermissionDenied)) {
+    if (!isPermissionDenied(error)) {
       throw error;
     }
   }
+
+  // Descending after the directory has been read, rather than inside the loop,
+  // so one directory's subtrees are walked together. The result is sorted by
+  // `collectFiles`, so the order they finish in does not reach a caller.
+  await Promise.all(
+    subdirectories.map((path) => collectFilesRecursive(path, files, options)),
+  );
 }
 
 /**
@@ -206,10 +230,10 @@ export function matchGlob(name: string, pattern: string): boolean {
  */
 export async function ensureDirectory(path: string): Promise<void> {
   try {
-    await Deno.mkdir(path, { recursive: true });
+    await mkdirp(path);
   } catch (error) {
     // Ignore if already exists
-    if (!(error instanceof Deno.errors.AlreadyExists)) {
+    if (!isAlreadyExists(error)) {
       throw error;
     }
   }
@@ -226,7 +250,7 @@ export async function copyFile(src: string, dest: string): Promise<void> {
   if (destDir) {
     await ensureDirectory(destDir);
   }
-  await Deno.copyFile(src, dest);
+  await copyFileRaw(src, dest);
 }
 
 /**
@@ -400,8 +424,8 @@ export async function validateFileExists(
   field: string,
 ): Promise<ValidationError | null> {
   try {
-    const stat = await Deno.stat(path);
-    if (!stat.isFile) {
+    const info = await stat(path);
+    if (!info.isFile) {
       return { field, message: `${field} must be a file, not a directory` };
     }
     return null;
@@ -418,8 +442,8 @@ export async function validateDirectoryExists(
   field: string,
 ): Promise<ValidationError | null> {
   try {
-    const stat = await Deno.stat(path);
-    if (!stat.isDirectory) {
+    const info = await stat(path);
+    if (!info.isDirectory) {
       return { field, message: `${field} must be a directory, not a file` };
     }
     return null;
@@ -568,32 +592,20 @@ export interface RunCommandOptions {
  */
 export async function runCommand(options: RunCommandOptions): Promise<CommandResult> {
   try {
-    const command = new Deno.Command(options.command, {
-      args: [...options.args],
+    const { success, status, stdout, stderr } = await run(options.command, options.args, {
       cwd: options.cwd,
-      stdout: "piped",
-      stderr: "piped",
     });
 
-    const { code, stdout, stderr } = await command.output();
-    const decoder = new TextDecoder();
-    const stdoutText = decoder.decode(stdout);
-    const stderrText = decoder.decode(stderr);
-
-    if (code !== 0) {
+    if (!success) {
       return {
         success: false,
-        error: `Command failed with exit code ${code}`,
-        code,
-        stderr: stderrText,
+        error: `Command failed with exit code ${status}`,
+        code: status ?? undefined,
+        stderr,
       };
     }
 
-    return {
-      success: true,
-      stdout: stdoutText,
-      stderr: stderrText,
-    };
+    return { success: true, stdout, stderr };
   } catch (error) {
     return {
       success: false,
@@ -608,10 +620,16 @@ export async function runCommand(options: RunCommandOptions): Promise<CommandRes
 export function runDenoScript(
   scriptPath: string,
   cwd?: string,
+  configPath?: string,
 ): Promise<CommandResult> {
+  // A subprocess resolves its own config from its working directory and cannot
+  // inherit the one its parent was started with. That is invisible until a
+  // project depends on something unpublished, at which point the generated
+  // script fails to resolve a specifier the project itself resolves fine.
+  const config = configPath === undefined ? [] : ["-c", configPath];
   return runCommand({
     command: "deno",
-    args: ["run", "-A", scriptPath],
+    args: ["run", "-A", ...config, scriptPath],
     cwd,
   });
 }
@@ -656,11 +674,11 @@ export function transformFiles(options: TransformFilesOptions): Promise<string[]
     }
 
     // Read and transform content
-    const content = await Deno.readTextFile(file);
+    const content = await readText(file);
     const transformed = transform(content, file);
 
     // Write transformed content
-    await Deno.writeTextFile(outputPath, transformed);
+    await writeText(outputPath, transformed);
     log?.(`Transformed: ${relativePath}`);
 
     return outputPath;
@@ -890,6 +908,190 @@ export function npmExportsOf(
     map[entry.name] = { types: path, default: path };
   }
   return map;
+}
+
+/**
+ * The compiler options a source config sets that a node build should inherit.
+ *
+ * The tool used to hand dnt a hardcoded `lib` and nothing else, so a package
+ * that compiles under deno failed under dnt with a type error on every decorated
+ * declaration, and one relying on emitted decorator metadata compiled with the
+ * metadata absent.
+ *
+ * **This is a filter, not a validation.** dnt does not reject an option it does
+ * not know: a build with `totallyNotARealTsOption: 42` in this object succeeds,
+ * and `experimentalDecorators` is honoured despite being absent from dnt's own
+ * `compilerOptions` type. Both were checked rather than assumed. So the list
+ * exists to keep deno-specific options out of a node build, not to keep dnt
+ * happy: `types: ["npm:@types/bun"]` and a `jsxImportSource` naming a
+ * deno-resolved specifier are meaningful where they were written and wrong here.
+ *
+ * The list is dnt 0.43.2's own eighteen, plus `experimentalDecorators`. It
+ * cannot be derived, so it is pinned instead: {@linkcode DNT_COMPILER_OPTIONS}
+ * is the whole of it, `tests/decorators_test.ts` asserts its exact contents, and
+ * the dnt version it tracks is pinned in `deno_to_node.ts`. An option a package
+ * needs and this does not carry is a gap to close by naming it here, with a
+ * reason, rather than a thing the code silently decides.
+ *
+ * `lib` is defaulted rather than fixed, because the target is node rather than
+ * whatever the source was written against. A config naming its own wins, since a
+ * package that says what it needs said it deliberately.
+ */
+export const DNT_COMPILER_OPTIONS: readonly string[] = [
+  // dnt 0.43.2's `compilerOptions`, in the order its type declares them
+  "importHelpers",
+  "stripInternal",
+  "strictBindCallApply",
+  "strictFunctionTypes",
+  "strictNullChecks",
+  "strictPropertyInitialization",
+  "noImplicitAny",
+  "noImplicitReturns",
+  "noImplicitThis",
+  "noStrictGenericChecks",
+  "noUncheckedIndexedAccess",
+  "target",
+  "sourceMap",
+  "inlineSources",
+  "lib",
+  "skipLibCheck",
+  "emitDecoratorMetadata",
+  "useUnknownInCatchVariables",
+  // Not in dnt's type and reaches TypeScript anyway, which the decorated
+  // fixture demonstrates: without it the build fails with TS1240 on every
+  // decorated declaration.
+  "experimentalDecorators",
+];
+
+/** The options this deliberately does not forward, and why. Asserted by the tests. */
+export const DENO_ONLY_COMPILER_OPTIONS: Readonly<Record<string, string>> = {
+  types: "names deno-resolved type roots, such as npm:@types/bun",
+  jsx: "deno's jsx modes do not all exist for a node build",
+  jsxImportSource: "names a specifier only deno resolves",
+  jsxFactory: "meaningless without a jsx mode this does not forward",
+  jsxFragmentFactory: "meaningless without a jsx mode this does not forward",
+};
+
+export function dntCompilerOptions(
+  config: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const declared = config["compilerOptions"];
+  const options: Record<string, unknown> = { lib: ["ES2022", "DOM"] };
+  if (declared === null || typeof declared !== "object") return options;
+
+  for (const key of DNT_COMPILER_OPTIONS) {
+    const value = (declared as Record<string, unknown>)[key];
+    if (value !== undefined) options[key] = value;
+  }
+  return options;
+}
+
+/**
+ * The commands a package installs, with each path put where the distribution
+ * actually wrote it.
+ *
+ * A package that ships a command line tool declares it in its source config the
+ * way npm spells it, as `bin`: either a map from command name to file, or a bare
+ * string when the command is named after the package. Deno itself has no such
+ * field and ignores the key, so the declaration costs the source nothing and is
+ * read here.
+ *
+ * It cannot be inferred, and that is why it is declared. An export called
+ * `./cli` is a subpath a consumer imports; whether it is also a command, and
+ * what that command is called, is a separate fact. Deno's own installer guesses
+ * from the file stem and treats `cli` as generic, which is the guess the
+ * publishing discipline says to override with a name.
+ *
+ * `resolve` maps a source path to the built one: a compiled distribution passes
+ * the function that renames `./cli.ts` to `./esm/cli.js`, and one that ships the
+ * sources passes the identity.
+ */
+export function binOf(
+  config: Readonly<Record<string, unknown>>,
+  resolve: (sourcePath: string) => string,
+): Record<string, string> {
+  const declared = config["bin"];
+  const map: Record<string, string> = {};
+
+  if (typeof declared === "string" && declared.length > 0) {
+    // The bare form names the package. npm resolves it to the unscoped half, so
+    // `@hiisi/otso` installs a command called `otso` rather than one nobody can
+    // type.
+    const name = typeof config["name"] === "string" ? config["name"] : "";
+    const command = name.startsWith("@") ? name.slice(name.indexOf("/") + 1) : name;
+    if (command.length > 0) map[command] = resolve(declared);
+    return map;
+  }
+
+  if (declared !== null && typeof declared === "object") {
+    for (const [command, path] of Object.entries(declared as Record<string, unknown>)) {
+      if (typeof path !== "string" || path.length === 0) continue;
+      map[command] = resolve(path);
+    }
+  }
+
+  return map;
+}
+
+/**
+ * The first line a command's entry point needs, per runtime.
+ *
+ * npm's own documentation is blunt about this: without it "the scripts are
+ * started without the node executable", which is a package that installs
+ * cleanly and then does nothing. It cannot come from the source, because the
+ * line names the runtime and one source builds three distributions.
+ *
+ * Deno's is the `-S` form, which is what lets a single `env` argument carry the
+ * subcommand and its flags. Deno installs a command from an export rather than
+ * from a manifest field, so this one matters only for a file run directly.
+ */
+export const SHEBANG: Readonly<Record<string, string>> = {
+  node: "#!/usr/bin/env node",
+  bun: "#!/usr/bin/env bun",
+  deno: "#!/usr/bin/env -S deno run -A",
+};
+
+/**
+ * Turn a built file into something a shell can execute: the right first line,
+ * and the mode bit that lets the kernel read it.
+ *
+ * Both, in one call, because they are one requirement and splitting them is how
+ * the second gets forgotten. It was: with the shebang alone, `npm install`
+ * produced a working command and `bun install` produced `Permission denied`.
+ * npm copies the package and chmods whatever `bin` names, so it repairs the
+ * omission on the way in; bun's `file:` install symlinks straight through to the
+ * built tree, so the mode is whatever the build left, and the build left `644`.
+ * A package that works under one installer and not the other is the shape that
+ * ships, because whoever wrote it tested under the one that repairs it.
+ *
+ * The shebang replaces whatever was there rather than being prepended to it. A
+ * source that carries one has it for whichever runtime its author ran it under,
+ * and two is a syntax error in the worst available position: the second is read
+ * as a private-field declaration at the top level.
+ *
+ * Throws when the file is not there. A `bin` naming a path that was never built
+ * produces a package that installs and leaves a broken command on the PATH, so
+ * the caller wants to hear about it rather than ship it.
+ */
+export async function makeRunnable(path: string, line: string): Promise<void> {
+  const text = await readText(path);
+  // A file that is nothing but a shebang has no newline to cut at, and
+  // `indexOf` reporting -1 there would leave the old line in place and put the
+  // new one above it. Explicit rather than arithmetic on a sentinel.
+  const firstBreak = text.indexOf("\n");
+  const body = !text.startsWith("#!") ? text : firstBreak === -1 ? "" : text.slice(firstBreak + 1);
+  await writeText(path, `${line}\n${body}`);
+  // Windows has no mode bits, and `chmod` is a no-op there rather than a
+  // throw, so this is unconditional. An earlier version guarded it with
+  // `platform() !== "windows"` against a `platform()` that answered node's
+  // `win32`: the condition was true on every platform including windows, so
+  // the guard did nothing, and the comment above it claimed a throw that does
+  // not happen. Two wrongs cancelling is not a reason to keep either.
+  //
+  // A package built on windows and installed on a unix by npm still works,
+  // because npm sets the bit itself. The one that would not survive is bun's
+  // symlink, and that combination has no unix on either end.
+  await chmod(path, 0o755);
 }
 
 /**

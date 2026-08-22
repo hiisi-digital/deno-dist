@@ -7,22 +7,27 @@
 
 import type { Plugin, PluginContext, PluginMetadata, PluginPhaseResult } from "../types.ts";
 import {
+  binOf,
   createTimer,
   DEFAULT_COPY_FILES,
   DEFAULT_ENTRY_POINT,
+  dntCompilerOptions,
   ensureDirectory,
   entryPointsOf,
   failureResult,
   getPackageMetadata,
   getPackageName,
   getPackageVersion,
+  makeRunnable,
   runDenoScript,
   selfImportsOf,
+  SHEBANG,
   successResult,
   tryCopyFile,
 } from "./utils.ts";
 import type { EntryPoint } from "./utils.ts";
 
+import { isNotFound, remove, stat, writeText } from "@hiisi/shimp";
 // =============================================================================
 // Plugin Metadata
 // =============================================================================
@@ -58,6 +63,16 @@ export interface DenoToNodeOptions {
   readonly declaration?: "inline" | "separate" | false;
   /** Whether to generate ESM output (default: true) */
   readonly esm?: boolean;
+  /**
+   * A config file for the generated dnt script to build under.
+   *
+   * The script runs as a subprocess and resolves its own config from the source
+   * directory, so it cannot see the one this tool was started with. Name one
+   * here when the project's specifiers only resolve under a particular config,
+   * which is the case while a dependency is unpublished and reached through
+   * `links`. Relative to the source directory.
+   */
+  readonly denoConfig?: string;
   /** Whether to generate CJS output (default: true) */
   readonly cjs?: boolean;
   /** Test file patterns to include */
@@ -92,6 +107,23 @@ export interface DenoToNodeShims {
 // Constants
 // =============================================================================
 
+/**
+ * The dnt this tool builds with.
+ *
+ * Pinned rather than bare, because a bare `jsr:@deno/dnt` resolves against the
+ * lockfile of the project being built, which is not a thing this tool controls
+ * and not a thing the person running it is thinking about. Two packages built by
+ * the same command on the same machine came out different: one project's lock
+ * held 0.41.3, whose translation of `import.meta.main` compares `import.meta.url`
+ * against a raw `process.argv[1]` and is therefore false for every installed
+ * command, and a project with no lock got 0.43.2, whose ponyfill is correct. The
+ * first produced a command that ran, printed nothing and exited zero.
+ *
+ * So the build tool decides its own build tool's version. Raising this is a
+ * deliberate act with a rebuild behind it, which is what a pin is for.
+ */
+export const DNT_VERSION = "0.43.2";
+
 const DNT_BUILD_SCRIPT_NAME = "_dnt_build.ts";
 
 // =============================================================================
@@ -124,10 +156,10 @@ const denoToNodePlugin: Plugin = {
     const checked = await Promise.all(entryPoints.map(async (entry) => {
       const fullEntryPath = `${context.sourceDir}/${entry.path}`;
       try {
-        const stat = await Deno.stat(fullEntryPath);
-        return stat.isFile ? undefined : `Entry point is not a file: ${fullEntryPath}`;
+        const info = await stat(fullEntryPath);
+        return info.isFile ? undefined : `Entry point is not a file: ${fullEntryPath}`;
       } catch (error) {
-        if (error instanceof Deno.errors.NotFound) {
+        if (isNotFound(error)) {
           return `Entry point not found: ${fullEntryPath}`;
         }
         return `Failed to check entry point: ${String(error)}`;
@@ -167,6 +199,14 @@ const denoToNodePlugin: Plugin = {
     const packageName = options?.packageName ?? getPackageName(context);
     const packageVersion = options?.packageVersion ?? getPackageVersion(context);
 
+    // dnt compiles, so a declared command has to point at what it emitted rather
+    // than at the source the config named. Both module systems are emitted when
+    // asked for, and the entry goes to the ES module one whenever it exists: dnt
+    // drops a `{"type":"module"}` beside it, so node reads the file correctly
+    // whichever way the surrounding package is declared.
+    const compiledDir = (options?.esm ?? true) ? "esm" : "script";
+    const bin = binOf(context.variables.config, (path) => compiledPath(path, compiledDir));
+
     // Build the dnt script
     const buildScript = generateBuildScript({
       sourceDir: context.sourceDir,
@@ -182,7 +222,14 @@ const denoToNodePlugin: Plugin = {
         ...(Object.keys(selfImportsOf(context.variables.config)).length > 0
           ? { imports: selfImportsOf(context.variables.config) }
           : {}),
+        ...(Object.keys(bin).length > 0 ? { bin } : {}),
       },
+      compilerOptions: dntCompilerOptions(context.variables.config),
+      // Absolute, because the generated script's own resolution base is not
+      // something this can rely on being the source directory.
+      denoConfig: options?.denoConfig === undefined
+        ? undefined
+        : `${context.sourceDir}/${options.denoConfig}`,
       declaration: options?.declaration ?? "inline",
       esm: options?.esm ?? true,
       cjs: options?.cjs ?? true,
@@ -196,13 +243,17 @@ const denoToNodePlugin: Plugin = {
 
     // Write the build script to a temp file
     const tempScriptPath = `${context.outputDir}/${DNT_BUILD_SCRIPT_NAME}`;
-    await Deno.writeTextFile(tempScriptPath, buildScript);
+    await writeText(tempScriptPath, buildScript);
     affectedFiles.push(tempScriptPath);
 
     context.log.debug(`Build script written to: ${tempScriptPath}`);
 
     // Run the build script
-    const runResult = await runDenoScript(tempScriptPath, context.sourceDir);
+    const runResult = await runDenoScript(
+      tempScriptPath,
+      context.sourceDir,
+      options?.denoConfig,
+    );
     if (!runResult.success) {
       return failureResult(
         `dnt build failed: ${runResult.stderr ?? runResult.error}`,
@@ -219,6 +270,30 @@ const denoToNodePlugin: Plugin = {
 
     // Clean up temp script
     await cleanupTempScript(tempScriptPath);
+
+    // npm's own documentation is blunt about the consequence of skipping this:
+    // without the line "the scripts are started without the node executable".
+    // dnt does not write one, so it is written here, onto the file the manifest
+    // just claimed is a command.
+    const runnable = await Promise.all(
+      Object.entries(bin).map(async ([command, path]) => {
+        const onDisk = `${context.outputDir}/${path.replace(/^\.\//, "")}`;
+        try {
+          await makeRunnable(onDisk, SHEBANG["node"] ?? "");
+          return { path: onDisk, problem: null as string | null };
+        } catch (error) {
+          return {
+            path: onDisk,
+            problem: `bin "${command}" names ${path}, which dnt did not emit: ${String(error)}`,
+          };
+        }
+      }),
+    );
+    const unbuilt = runnable.find((r) => r.problem !== null)?.problem;
+    if (unbuilt !== undefined && unbuilt !== null) {
+      return failureResult(unbuilt, timer.elapsed());
+    }
+    affectedFiles.push(...runnable.map((r) => r.path));
 
     // Copy additional files if specified
     const filesToCopy = options?.copyFiles ?? DEFAULT_COPY_FILES;
@@ -276,7 +351,7 @@ const denoToNodePlugin: Plugin = {
  */
 async function cleanupTempScript(scriptPath: string): Promise<void> {
   try {
-    await Deno.remove(scriptPath);
+    await remove(scriptPath);
   } catch {
     // Ignore cleanup errors - not critical
   }
@@ -294,6 +369,8 @@ function generateBuildScript(options: {
   packageMetadata: Record<string, unknown>;
   declaration: "inline" | "separate" | false;
   esm: boolean;
+  compilerOptions: Record<string, unknown>;
+  denoConfig?: string;
   cjs: boolean;
   test: boolean;
   shims?: DenoToNodeShims;
@@ -335,8 +412,25 @@ function generateBuildScript(options: {
   // Build mappings if provided
   const mappingsLine = options.mappings ? `  mappings: ${JSON.stringify(options.mappings)},` : "";
 
+  // dnt resolves the module graph itself rather than through the deno CLI, so
+  // `-c` on the subprocess does not reach it and neither does `links`. Its own
+  // `importMap` option is the way in, and a deno config with an `imports` block
+  // is a valid import map.
+  //
+  // What this does not do, measured rather than assumed: it does not make a
+  // `jsr:` specifier resolve to a local path. dnt asks the registry for a jsr
+  // package regardless of the import map, the lockfile, `links`, or `-c`, so a
+  // package with an unpublished jsr dependency cannot be built for node at all.
+  // Its bun and deno distributions are unaffected, because neither goes through
+  // dnt. The order that follows is that a dependency publishes before its
+  // consumer can ship a node build, which is ordinary and worth knowing before
+  // planning a release rather than during one.
+  const importMapLine = options.denoConfig
+    ? `  importMap: ${JSON.stringify(options.denoConfig)},`
+    : "";
+
   return `// Auto-generated dnt build script
-import { build, emptyDir } from "jsr:@deno/dnt";
+import { build, emptyDir } from "jsr:@deno/dnt@${DNT_VERSION}";
 
 await emptyDir(${safeOutputDir});
 
@@ -354,9 +448,8 @@ await build({
     webSocket: ${shimsConfig.webSocket},
   },
   package: ${packageBlock},
-  compilerOptions: {
-    lib: ["ES2022", "DOM"],
-  },
+${importMapLine}
+  compilerOptions: ${JSON.stringify(options.compilerOptions)},
   typeCheck: "both",
   declaration: ${JSON.stringify(options.declaration)},
   esModule: ${options.esm},
@@ -369,12 +462,25 @@ ${mappingsLine}
 const filesToCopy = ["LICENSE", "README.md"];
 for (const file of filesToCopy) {
   try {
-    await Deno.copyFile(file, ${safeOutputDir} + "/" + file);
+    await copyFile(file, ${safeOutputDir} + "/" + file);
   } catch {
     // File doesn't exist, skip
   }
 }
 `;
+}
+
+/**
+ * Where dnt puts the compiled form of a source file.
+ *
+ * The output mirrors the source tree under one directory per module system, so
+ * `./src/cli.ts` becomes `./esm/src/cli.js`. Only the extension and the prefix
+ * move; the path in between is the one the source was written with, which is
+ * what makes the result predictable from the config alone.
+ */
+function compiledPath(sourcePath: string, dir: string): string {
+  const bare = sourcePath.startsWith("./") ? sourcePath.slice(2) : sourcePath;
+  return `./${dir}/${bare.replace(/\.[cm]?tsx?$/, ".js")}`;
 }
 
 /**

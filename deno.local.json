@@ -20,7 +20,7 @@
     "@std/cli": "jsr:@std/cli@^1.0.0",
     "@std/jsonc": "jsr:@std/jsonc@^1.0.0",
     "@std/cli/parse-args": "jsr:@std/cli@^1.0.0/parse-args",
-    "@hiisi/shimp": "jsr:@hiisi/shimp@^0.1.0"
+    "@hiisi/shimp": "../shimp/mod.ts"
   },
   "lint": {
     "include": [
@@ -123,7 +123,8 @@
             "cjs": false,
             "shims": {
               "deno": true
-            }
+            },
+            "denoConfig": "deno.local.json"
           }
         }
       ]

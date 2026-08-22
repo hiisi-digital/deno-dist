@@ -1,0 +1,40 @@
+{
+  "name": "@hiisi/command-fixture",
+  "version": "0.1.0",
+  "description": "Fixture command line tool for the bin and shebang end-to-end test.",
+  "license": "MPL-2.0",
+  "repository": "https://github.com/hiisi-digital/deno-dist",
+  "exports": {
+    ".": "./mod.ts",
+    "./cli": "./cli.ts"
+  },
+  "bin": {
+    "greet-fixture": "./cli.ts"
+  },
+  "distDir": "target",
+  "dist": {
+    "node": {
+      "runtime": "node",
+      "plugins": [
+        {
+          "id": "deno-to-node",
+          "options": {
+            "cjs": false
+          }
+        }
+      ]
+    },
+    "bun": {
+      "runtime": "bun",
+      "plugins": [
+        "deno-to-bun"
+      ]
+    },
+    "deno": {
+      "runtime": "deno",
+      "plugins": [
+        "deno-passthrough"
+      ]
+    }
+  }
+}
