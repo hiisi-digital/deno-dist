@@ -8,6 +8,7 @@
 import type { FileOperation, Plugin, PluginMetadata, SetupContext, SetupResult } from "../types.ts";
 import { createTimer, failureResult, successResult } from "./utils.ts";
 
+import { mkdirp, writeText } from "@hiisi/shimp";
 // =============================================================================
 // Plugin Metadata
 // =============================================================================
@@ -162,12 +163,12 @@ const githubActionsPlugin: Plugin = {
       if (!context.dryRun) {
         // Collect unique directories and create them
         const dirs = new Set(files.map((f) => f.path.substring(0, f.path.lastIndexOf("/"))));
-        await Promise.all([...dirs].map((dir) => Deno.mkdir(dir, { recursive: true })));
+        await Promise.all([...dirs].map((dir) => mkdirp(dir)));
 
         // Write all files in parallel
         await Promise.all(
           files.map(async (file) => {
-            await Deno.writeTextFile(file.path, file.content);
+            await writeText(file.path, file.content);
             context.log.info(`Created: ${file.path}`);
           }),
         );

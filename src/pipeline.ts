@@ -35,6 +35,7 @@ import type {
 } from "./types.ts";
 import { PipelineError } from "./types.ts";
 
+import { cwd, isNotFound, readText, remove } from "@hiisi/shimp";
 // =============================================================================
 // Types
 // =============================================================================
@@ -163,7 +164,7 @@ export async function loadConfigAsRecord(
   const contents = await Promise.all(
     candidates.map(async (path) => {
       try {
-        return await Deno.readTextFile(path);
+        return await readText(path);
       } catch {
         return null;
       }
@@ -206,7 +207,7 @@ function createContextFactory(
   loggers: Map<string, LogFunctions>,
 ): ContextFactory {
   const distDir = config.distDir ?? "target";
-  const sourceDir = Deno.cwd();
+  const sourceDir = cwd();
   const verbose = options.verbose ?? false;
   const dryRun = options.dryRun ?? false;
 
@@ -331,7 +332,7 @@ export async function runPipeline(
 
   const distDir = config.distDir ?? "target";
   const outputDir = join(distDir, distName);
-  const sourceDir = Deno.cwd();
+  const sourceDir = cwd();
   const verbose = options.verbose ?? false;
   const log = createLogFunctions(verbose, distName);
 
@@ -415,9 +416,9 @@ export async function runPipeline(
 async function cleanOutputDirectory(outputDir: string, log: LogFunctions): Promise<void> {
   log.info(`Cleaning output directory: ${outputDir}`);
   try {
-    await Deno.remove(outputDir, { recursive: true });
+    await remove(outputDir, { recursive: true });
   } catch (error) {
-    if (!(error instanceof Deno.errors.NotFound)) {
+    if (!(isNotFound(error))) {
       throw new PipelineError(
         `Failed to clean output directory: ${String(error)}`,
         "preprocess",

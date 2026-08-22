@@ -8,6 +8,19 @@
 
 import type { PluginContext, PluginPhaseResult } from "../types.ts";
 
+import {
+  chmod,
+  copyFile as copyFileRaw,
+  isAlreadyExists,
+  isPermissionDenied,
+  mkdirp,
+  platform,
+  readDir,
+  readText,
+  run,
+  stat,
+  writeText,
+} from "@hiisi/shimp";
 // =============================================================================
 // Types
 // =============================================================================
@@ -91,7 +104,11 @@ export async function collectFiles(
     includeAssets,
   });
 
-  return files;
+  // Sorted, which it never was. The order came out of the filesystem's own
+  // enumeration, and it feeds transforms, manifests and dependency derivation,
+  // so the same source could produce differently-ordered output on two machines.
+  // Sorting also frees the walk to recurse in parallel.
+  return files.sort();
 }
 
 /**
@@ -109,8 +126,9 @@ async function collectFilesRecursive(
     includeAssets: boolean;
   },
 ): Promise<void> {
+  const subdirectories: string[] = [];
   try {
-    for await (const entry of Deno.readDir(dir)) {
+    for (const entry of await readDir(dir)) {
       const path = `${dir}/${entry.name}`;
 
       if (entry.isDirectory) {
@@ -122,7 +140,7 @@ async function collectFilesRecursive(
         if (options.exclude?.some((pattern) => matchGlob(entry.name, pattern))) {
           continue;
         }
-        await collectFilesRecursive(path, files, options);
+        subdirectories.push(path);
       } else if (entry.isFile) {
         // Skip test files if not including them
         if (!options.includeTests && isTestFile(entry.name)) {
@@ -152,10 +170,17 @@ async function collectFilesRecursive(
     }
   } catch (error) {
     // Silently skip directories we can't read
-    if (!(error instanceof Deno.errors.PermissionDenied)) {
+    if (!isPermissionDenied(error)) {
       throw error;
     }
   }
+
+  // Descending after the directory has been read, rather than inside the loop,
+  // so one directory's subtrees are walked together. The result is sorted by
+  // `collectFiles`, so the order they finish in does not reach a caller.
+  await Promise.all(
+    subdirectories.map((path) => collectFilesRecursive(path, files, options)),
+  );
 }
 
 /**
@@ -206,10 +231,10 @@ export function matchGlob(name: string, pattern: string): boolean {
  */
 export async function ensureDirectory(path: string): Promise<void> {
   try {
-    await Deno.mkdir(path, { recursive: true });
+    await mkdirp(path);
   } catch (error) {
     // Ignore if already exists
-    if (!(error instanceof Deno.errors.AlreadyExists)) {
+    if (!isAlreadyExists(error)) {
       throw error;
     }
   }
@@ -226,7 +251,7 @@ export async function copyFile(src: string, dest: string): Promise<void> {
   if (destDir) {
     await ensureDirectory(destDir);
   }
-  await Deno.copyFile(src, dest);
+  await copyFileRaw(src, dest);
 }
 
 /**
@@ -400,8 +425,8 @@ export async function validateFileExists(
   field: string,
 ): Promise<ValidationError | null> {
   try {
-    const stat = await Deno.stat(path);
-    if (!stat.isFile) {
+    const info = await stat(path);
+    if (!info.isFile) {
       return { field, message: `${field} must be a file, not a directory` };
     }
     return null;
@@ -418,8 +443,8 @@ export async function validateDirectoryExists(
   field: string,
 ): Promise<ValidationError | null> {
   try {
-    const stat = await Deno.stat(path);
-    if (!stat.isDirectory) {
+    const info = await stat(path);
+    if (!info.isDirectory) {
       return { field, message: `${field} must be a directory, not a file` };
     }
     return null;
@@ -568,32 +593,20 @@ export interface RunCommandOptions {
  */
 export async function runCommand(options: RunCommandOptions): Promise<CommandResult> {
   try {
-    const command = new Deno.Command(options.command, {
-      args: [...options.args],
+    const { success, status, stdout, stderr } = await run(options.command, options.args, {
       cwd: options.cwd,
-      stdout: "piped",
-      stderr: "piped",
     });
 
-    const { code, stdout, stderr } = await command.output();
-    const decoder = new TextDecoder();
-    const stdoutText = decoder.decode(stdout);
-    const stderrText = decoder.decode(stderr);
-
-    if (code !== 0) {
+    if (!success) {
       return {
         success: false,
-        error: `Command failed with exit code ${code}`,
-        code,
-        stderr: stderrText,
+        error: `Command failed with exit code ${status}`,
+        code: status ?? undefined,
+        stderr,
       };
     }
 
-    return {
-      success: true,
-      stdout: stdoutText,
-      stderr: stderrText,
-    };
+    return { success: true, stdout, stderr };
   } catch (error) {
     return {
       success: false,
@@ -656,11 +669,11 @@ export function transformFiles(options: TransformFilesOptions): Promise<string[]
     }
 
     // Read and transform content
-    const content = await Deno.readTextFile(file);
+    const content = await readText(file);
     const transformed = transform(content, file);
 
     // Write transformed content
-    await Deno.writeTextFile(outputPath, transformed);
+    await writeText(outputPath, transformed);
     log?.(`Transformed: ${relativePath}`);
 
     return outputPath;
@@ -893,21 +906,67 @@ export function npmExportsOf(
 }
 
 /**
- * The compiler options a source config sets that dnt also understands.
+ * The compiler options a source config sets that a node build should inherit.
  *
- * dnt takes a small named subset rather than a whole tsconfig, so the ones it
- * has no opinion about are dropped here rather than passed through to be
- * rejected. What it does take, it needs: a package whose sources use decorators
- * compiles under deno, which enables them by config, and fails under dnt, which
- * was never told. The failure is a type error on every decorated declaration, so
- * it is at least loud; `emitDecoratorMetadata` is the quiet one, because without
- * it the code compiles and the metadata a framework reflects on is simply not
- * there.
+ * The tool used to hand dnt a hardcoded `lib` and nothing else, so a package
+ * that compiles under deno failed under dnt with a type error on every decorated
+ * declaration, and one relying on emitted decorator metadata compiled with the
+ * metadata absent.
  *
- * `lib` is the one this tool sets itself, since the target is node rather than
- * whatever the source was written against. A config that names its own wins,
- * because a package that says what it needs has said it deliberately.
+ * **This is a filter, not a validation.** dnt does not reject an option it does
+ * not know: a build with `totallyNotARealTsOption: 42` in this object succeeds,
+ * and `experimentalDecorators` is honoured despite being absent from dnt's own
+ * `compilerOptions` type. Both were checked rather than assumed. So the list
+ * exists to keep deno-specific options out of a node build, not to keep dnt
+ * happy: `types: ["npm:@types/bun"]` and a `jsxImportSource` naming a
+ * deno-resolved specifier are meaningful where they were written and wrong here.
+ *
+ * The list is dnt 0.43.2's own eighteen, plus `experimentalDecorators`. It
+ * cannot be derived, so it is pinned instead: {@linkcode DNT_COMPILER_OPTIONS}
+ * is the whole of it, `tests/decorators_test.ts` asserts its exact contents, and
+ * the dnt version it tracks is pinned in `deno_to_node.ts`. An option a package
+ * needs and this does not carry is a gap to close by naming it here, with a
+ * reason, rather than a thing the code silently decides.
+ *
+ * `lib` is defaulted rather than fixed, because the target is node rather than
+ * whatever the source was written against. A config naming its own wins, since a
+ * package that says what it needs said it deliberately.
  */
+export const DNT_COMPILER_OPTIONS: readonly string[] = [
+  // dnt 0.43.2's `compilerOptions`, in the order its type declares them
+  "importHelpers",
+  "stripInternal",
+  "strictBindCallApply",
+  "strictFunctionTypes",
+  "strictNullChecks",
+  "strictPropertyInitialization",
+  "noImplicitAny",
+  "noImplicitReturns",
+  "noImplicitThis",
+  "noStrictGenericChecks",
+  "noUncheckedIndexedAccess",
+  "target",
+  "sourceMap",
+  "inlineSources",
+  "lib",
+  "skipLibCheck",
+  "emitDecoratorMetadata",
+  "useUnknownInCatchVariables",
+  // Not in dnt's type and reaches TypeScript anyway, which the decorated
+  // fixture demonstrates: without it the build fails with TS1240 on every
+  // decorated declaration.
+  "experimentalDecorators",
+];
+
+/** The options this deliberately does not forward, and why. Asserted by the tests. */
+export const DENO_ONLY_COMPILER_OPTIONS: Readonly<Record<string, string>> = {
+  types: "names deno-resolved type roots, such as npm:@types/bun",
+  jsx: "deno's jsx modes do not all exist for a node build",
+  jsxImportSource: "names a specifier only deno resolves",
+  jsxFactory: "meaningless without a jsx mode this does not forward",
+  jsxFragmentFactory: "meaningless without a jsx mode this does not forward",
+};
+
 export function dntCompilerOptions(
   config: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
@@ -915,18 +974,7 @@ export function dntCompilerOptions(
   const options: Record<string, unknown> = { lib: ["ES2022", "DOM"] };
   if (declared === null || typeof declared !== "object") return options;
 
-  const understood = [
-    "target",
-    "lib",
-    "importHelpers",
-    "experimentalDecorators",
-    "emitDecoratorMetadata",
-    "skipLibCheck",
-    "strictBindCallApply",
-    "useUnknownInCatchVariables",
-    "stripInternal",
-  ];
-  for (const key of understood) {
+  for (const key of DNT_COMPILER_OPTIONS) {
     const value = (declared as Record<string, unknown>)[key];
     if (value !== undefined) options[key] = value;
   }
@@ -1021,19 +1069,19 @@ export const SHEBANG: Readonly<Record<string, string>> = {
  * the caller wants to hear about it rather than ship it.
  */
 export async function makeRunnable(path: string, line: string): Promise<void> {
-  const text = await Deno.readTextFile(path);
+  const text = await readText(path);
   // A file that is nothing but a shebang has no newline to cut at, and
   // `indexOf` reporting -1 there would leave the old line in place and put the
   // new one above it. Explicit rather than arithmetic on a sentinel.
   const firstBreak = text.indexOf("\n");
   const body = !text.startsWith("#!") ? text : firstBreak === -1 ? "" : text.slice(firstBreak + 1);
-  await Deno.writeTextFile(path, `${line}\n${body}`);
+  await writeText(path, `${line}\n${body}`);
   // Windows has no mode bits and `chmod` throws there rather than doing
   // nothing, so the platform decides whether this step exists at all. A package
   // built on Windows and installed on a unix by npm still works, because npm
   // sets the bit itself; the one it would not survive is bun's symlink, and
   // that combination has no unix on either end.
-  if (Deno.build.os !== "windows") await Deno.chmod(path, 0o755);
+  if (platform() !== "windows") await chmod(path, 0o755);
 }
 
 /**

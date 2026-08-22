@@ -6,7 +6,10 @@
  * running setup, and publishing releases.
  */
 
-import { parseArgs } from "@std/cli";
+// The submodule rather than the barrel. `@std/cli` re-exports `promptSecret`,
+// which reaches for `Deno.stdin` and so does not compile for node: importing the
+// package by name drags it into the graph, and this tool builds itself for node.
+import { parseArgs } from "@std/cli/parse-args";
 import { loadDistConfig, validateConfig } from "./config.ts";
 import {
   type ExtendedPipelineOptions,
@@ -24,6 +27,7 @@ import type { CliArgs, CliCommand, DistConfig, PipelineOptions } from "./types.t
 
 import { VERSION } from "./version.ts";
 
+import { args as processArgs, exit, readText } from "@hiisi/shimp";
 const PROGRAM_NAME = "deno-dist";
 
 // =============================================================================
@@ -394,7 +398,7 @@ const releaseCommand: CliCommand = {
     const notesPath = args.flags.notes;
     if (notesPath) {
       try {
-        releaseNotes = await Deno.readTextFile(notesPath);
+        releaseNotes = await readText(notesPath);
       } catch (error) {
         logger.error(`Failed to read release notes: ${String(error)}`);
         return 1;
@@ -563,7 +567,7 @@ function findCommand(name: string): CliCommand | undefined {
  * Main CLI entry point.
  */
 async function main(): Promise<number> {
-  const args = parseCliArgs(Deno.args);
+  const args = parseCliArgs(processArgs());
 
   // Handle global flags
   if (args.flags.help) {
@@ -588,7 +592,7 @@ async function main(): Promise<number> {
 // Run CLI
 if (import.meta.main) {
   const exitCode = await main();
-  Deno.exit(exitCode);
+  exit(exitCode);
 }
 
 export { main, parseCliArgs };

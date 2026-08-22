@@ -35,10 +35,10 @@
 
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { dirname, fromFileUrl, join, toFileUrl } from "@std/path";
+import { cliArgs } from "./_cli.ts";
 
 const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const FIXTURE_DIR = join(REPO_ROOT, "tests", "fixtures", "parity");
-const CLI = join(REPO_ROOT, "src", "cli.ts");
 
 /**
  * The consumer program. One source text, run under node, bun and deno, each
@@ -141,7 +141,7 @@ Deno.test("built distributions install, run and agree", async (t) => {
     await t.step("the CLI builds every distribution", async () => {
       const result = await run(
         Deno.execPath(),
-        ["run", "-A", CLI, "build", "--all"],
+        cliArgs("build", "--all"),
         project,
       );
       assertRan(result, "build --all");

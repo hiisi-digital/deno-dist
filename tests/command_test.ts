@@ -28,10 +28,10 @@ import { dirname, fromFileUrl, join } from "@std/path";
 
 import { binOf, makeRunnable, SHEBANG } from "../src/plugins/utils.ts";
 import { DNT_VERSION } from "../src/plugins/deno_to_node.ts";
+import { cliArgs } from "./_cli.ts";
 
 const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const FIXTURE_DIR = join(REPO_ROOT, "tests", "fixtures", "command");
-const CLI = join(REPO_ROOT, "src", "cli.ts");
 
 interface RunResult {
   readonly success: boolean;
@@ -171,7 +171,7 @@ Deno.test("a built command installs and runs as a command", async (t) => {
 
     await t.step("the CLI builds every distribution", async () => {
       assertRan(
-        await run(Deno.execPath(), ["run", "-A", CLI, "build", "--all"], project),
+        await run(Deno.execPath(), cliArgs("build", "--all"), project),
         "build --all",
       );
     });

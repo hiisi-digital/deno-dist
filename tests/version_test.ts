@@ -16,11 +16,13 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 
 import { VERSION } from "../src/version.ts";
+import { cliArgs } from "./_cli.ts";
+
+const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 
 Deno.test("the constant the CLI reports matches the version the config publishes", async () => {
-  const root = dirname(dirname(fromFileUrl(import.meta.url)));
   const config = JSON.parse(
-    await Deno.readTextFile(join(root, "deno.json")),
+    await Deno.readTextFile(join(REPO_ROOT, "deno.json")),
   ) as { version?: string };
   assertEquals(VERSION, config.version, "src/version.ts and deno.json disagree");
 });
@@ -31,9 +33,8 @@ Deno.test("the CLI prints that version rather than a fallback", async () => {
   // provably false and the assertion could never fail. It was a tautology
   // wearing a regression test's name. What it was reaching for is behavioural,
   // and this is that: run the thing and read what it says.
-  const root = dirname(dirname(fromFileUrl(import.meta.url)));
   const { success, stdout } = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", join(root, "src", "cli.ts"), "--version"],
+    args: cliArgs("--version"),
     stdout: "piped",
     stderr: "null",
   }).output();

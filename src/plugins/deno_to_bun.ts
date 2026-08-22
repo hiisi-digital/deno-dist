@@ -33,6 +33,7 @@ import {
   tryCopyFile,
 } from "./utils.ts";
 
+import { readText, stat, writeText } from "@hiisi/shimp";
 // =============================================================================
 // Plugin Metadata
 // =============================================================================
@@ -141,7 +142,7 @@ const denoToBunPlugin: Plugin = {
 
     // Validate entry point exists
     try {
-      await Deno.stat(fullEntryPath);
+      await stat(fullEntryPath);
     } catch {
       return failureResult(`Entry point not found: ${fullEntryPath}`, timer.elapsed());
     }
@@ -150,7 +151,7 @@ const denoToBunPlugin: Plugin = {
 
     // Warn about Deno-specific APIs that may need manual handling
     try {
-      const content = await Deno.readTextFile(fullEntryPath);
+      const content = await readText(fullEntryPath);
       if (content.includes("Deno.")) {
         warnings.push("Source uses Deno.* APIs. Some may not be available in Bun.");
       }
@@ -193,7 +194,7 @@ const denoToBunPlugin: Plugin = {
     // declaring from it makes an install fetch something unused and for a test-only jsr
     // package makes it fail outright: `@std/assert` has no npm publication under its own name.
     const sources = await Promise.all(
-      files.map((file) => Deno.readTextFile(file).catch(() => "")),
+      files.map((file) => readText(file).catch(() => "")),
     );
     const derived = deriveDependencies(configImports, {
       alreadyMapped: new Set(Object.keys(explicit)),
@@ -239,15 +240,12 @@ const denoToBunPlugin: Plugin = {
       return failureResult(unbuilt, timer.elapsed());
     }
     affectedFiles.push(...runnable.map((r) => r.path));
-    for (const entry of runnable) {
-      if ("path" in entry) affectedFiles.push(entry.path);
-    }
 
     // Generate package.json if requested
     if (options?.generatePackageJson !== false) {
       const packageJson = generatePackageJson(context, options, derived.dependencies);
       const packageJsonPath = `${context.outputDir}/package.json`;
-      await Deno.writeTextFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
+      await writeText(packageJsonPath, JSON.stringify(packageJson, null, 2));
       affectedFiles.push(packageJsonPath);
       context.log.debug("Generated package.json");
 
@@ -257,7 +255,7 @@ const denoToBunPlugin: Plugin = {
       // knowing where the dependency came from.
       if (derived.needsJsrRegistry) {
         const npmrcPath = `${context.outputDir}/.npmrc`;
-        await Deno.writeTextFile(npmrcPath, `@jsr:registry=${JSR_NPM_REGISTRY}\n`);
+        await writeText(npmrcPath, `@jsr:registry=${JSR_NPM_REGISTRY}\n`);
         affectedFiles.push(npmrcPath);
         context.log.debug("Generated .npmrc for the @jsr scope");
       }

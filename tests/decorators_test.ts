@@ -18,12 +18,16 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { cliArgs } from "./_cli.ts";
 
-import { dntCompilerOptions } from "../src/plugins/utils.ts";
+import {
+  DENO_ONLY_COMPILER_OPTIONS,
+  DNT_COMPILER_OPTIONS,
+  dntCompilerOptions,
+} from "../src/plugins/utils.ts";
 
 const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const FIXTURE_DIR = join(REPO_ROOT, "tests", "fixtures", "decorated");
-const CLI = join(REPO_ROOT, "src", "cli.ts");
 
 interface Ran {
   readonly success: boolean;
@@ -54,20 +58,63 @@ async function copyTree(from: string, to: string): Promise<void> {
   }
 }
 
-Deno.test("the tool keeps the options dnt understands and drops the rest", () => {
-  const picked = dntCompilerOptions({
-    compilerOptions: {
-      experimentalDecorators: true,
-      emitDecoratorMetadata: true,
-      strict: true,
-      noUncheckedIndexedAccess: true,
-    },
-  });
-  assertEquals(picked["experimentalDecorators"], true);
-  assertEquals(picked["emitDecoratorMetadata"], true);
-  // dnt rejects what it does not know, so an unrecognised key is dropped here
-  assertEquals(picked["strict"], undefined);
-  assertEquals(picked["noUncheckedIndexedAccess"], undefined);
+Deno.test("the forwarded set is exactly dnt's own, plus the one that is not in it", () => {
+  // Pinned by name rather than sampled. An earlier version of this test asserted
+  // that `noUncheckedIndexedAccess` is dropped, on the stated grounds that "dnt
+  // rejects what it does not know". Both halves were false: the option is in
+  // dnt 0.43.2's `compilerOptions` type, and dnt rejects nothing, which a build
+  // carrying `totallyNotARealTsOption: 42` demonstrated by succeeding. The test
+  // was pinning a defect as intended behaviour, which is the shape that survives
+  // review and gets cited later.
+  assertEquals([...DNT_COMPILER_OPTIONS].sort(), [
+    "emitDecoratorMetadata",
+    "experimentalDecorators",
+    "importHelpers",
+    "inlineSources",
+    "lib",
+    "noImplicitAny",
+    "noImplicitReturns",
+    "noImplicitThis",
+    "noStrictGenericChecks",
+    "noUncheckedIndexedAccess",
+    "skipLibCheck",
+    "sourceMap",
+    "strictBindCallApply",
+    "strictFunctionTypes",
+    "strictNullChecks",
+    "strictPropertyInitialization",
+    "stripInternal",
+    "target",
+    "useUnknownInCatchVariables",
+  ]);
+});
+
+Deno.test("every option dnt accepts is carried, including the ones nothing here uses", () => {
+  // A library carries what it exposes for others, so the test is over the whole
+  // set rather than over the two this repo happens to need.
+  const declared: Record<string, unknown> = {};
+  for (const key of DNT_COMPILER_OPTIONS) declared[key] = key === "lib" ? ["ES2023"] : true;
+  const picked = dntCompilerOptions({ compilerOptions: declared });
+  for (const key of DNT_COMPILER_OPTIONS) {
+    assert(picked[key] !== undefined, `${key} was declared and did not come through`);
+  }
+});
+
+Deno.test("a deno-only option is left behind, and says why", () => {
+  // The reason the filter exists at all. These are meaningful where they were
+  // written and wrong in a node build; dnt would accept them and TypeScript
+  // would act on them.
+  const declared: Record<string, unknown> = {};
+  for (const key of Object.keys(DENO_ONLY_COMPILER_OPTIONS)) declared[key] = ["npm:@types/bun"];
+  const picked = dntCompilerOptions({ compilerOptions: declared });
+  for (const [key, why] of Object.entries(DENO_ONLY_COMPILER_OPTIONS)) {
+    assertEquals(picked[key], undefined, `${key} should not be forwarded: ${why}`);
+  }
+  // and the two sets do not overlap, which is what makes both lists readable as
+  // one decision rather than two that might disagree
+  for (const key of Object.keys(DENO_ONLY_COMPILER_OPTIONS)) {
+    assert(!DNT_COMPILER_OPTIONS.includes(key), `${key} is in both lists`);
+  }
 });
 
 Deno.test("a config that names its own lib wins over the default", () => {
@@ -85,7 +132,7 @@ Deno.test("a decorated package builds and its metadata reaches a node consumer",
     await copyTree(FIXTURE_DIR, project);
 
     await t.step("it builds for node", async () => {
-      const result = await run(Deno.execPath(), ["run", "-A", CLI, "build", "node"], project);
+      const result = await run(Deno.execPath(), cliArgs("build", "node"), project);
       assert(result.success, `build failed:\n${result.stdout}${result.stderr}`);
     });
 

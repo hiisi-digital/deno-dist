@@ -27,6 +27,7 @@ import {
 } from "./utils.ts";
 import type { EntryPoint } from "./utils.ts";
 
+import { isNotFound, remove, stat, writeText } from "@hiisi/shimp";
 // =============================================================================
 // Plugin Metadata
 // =============================================================================
@@ -145,10 +146,10 @@ const denoToNodePlugin: Plugin = {
     const checked = await Promise.all(entryPoints.map(async (entry) => {
       const fullEntryPath = `${context.sourceDir}/${entry.path}`;
       try {
-        const stat = await Deno.stat(fullEntryPath);
-        return stat.isFile ? undefined : `Entry point is not a file: ${fullEntryPath}`;
+        const info = await stat(fullEntryPath);
+        return info.isFile ? undefined : `Entry point is not a file: ${fullEntryPath}`;
       } catch (error) {
-        if (error instanceof Deno.errors.NotFound) {
+        if (isNotFound(error)) {
           return `Entry point not found: ${fullEntryPath}`;
         }
         return `Failed to check entry point: ${String(error)}`;
@@ -227,7 +228,7 @@ const denoToNodePlugin: Plugin = {
 
     // Write the build script to a temp file
     const tempScriptPath = `${context.outputDir}/${DNT_BUILD_SCRIPT_NAME}`;
-    await Deno.writeTextFile(tempScriptPath, buildScript);
+    await writeText(tempScriptPath, buildScript);
     affectedFiles.push(tempScriptPath);
 
     context.log.debug(`Build script written to: ${tempScriptPath}`);
@@ -274,10 +275,6 @@ const denoToNodePlugin: Plugin = {
       return failureResult(unbuilt, timer.elapsed());
     }
     affectedFiles.push(...runnable.map((r) => r.path));
-
-    for (const entry of runnable) {
-      if ("path" in entry) affectedFiles.push(entry.path);
-    }
 
     // Copy additional files if specified
     const filesToCopy = options?.copyFiles ?? DEFAULT_COPY_FILES;
@@ -335,7 +332,7 @@ const denoToNodePlugin: Plugin = {
  */
 async function cleanupTempScript(scriptPath: string): Promise<void> {
   try {
-    await Deno.remove(scriptPath);
+    await remove(scriptPath);
   } catch {
     // Ignore cleanup errors - not critical
   }
@@ -427,7 +424,7 @@ ${mappingsLine}
 const filesToCopy = ["LICENSE", "README.md"];
 for (const file of filesToCopy) {
   try {
-    await Deno.copyFile(file, ${safeOutputDir} + "/" + file);
+    await copyFile(file, ${safeOutputDir} + "/" + file);
   } catch {
     // File doesn't exist, skip
   }

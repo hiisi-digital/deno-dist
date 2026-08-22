@@ -18,6 +18,7 @@ import type {
 } from "./types.ts";
 import { ConfigError } from "./types.ts";
 
+import { isNotFound, readText } from "@hiisi/shimp";
 // =============================================================================
 // Types
 // =============================================================================
@@ -138,13 +139,13 @@ function toStringRecord(value: unknown, fieldName: string): Record<string, strin
  */
 export async function loadDistConfig(path: string): Promise<DistConfig> {
   try {
-    const content = await Deno.readTextFile(path);
+    const content = await readText(path);
     return parseDistConfig(content, path);
   } catch (error) {
     if (error instanceof ConfigError) {
       throw error;
     }
-    if (error instanceof Deno.errors.NotFound) {
+    if (isNotFound(error)) {
       throw new ConfigError(`Configuration file not found: ${path}`);
     }
     throw new ConfigError(

@@ -24,15 +24,36 @@
 ## Installation
 
 ```bash
-# Install globally
-deno install -gAf -n deno-dist jsr:@hiisi/deno-dist/cli
+# deno, straight from jsr, no build in the way
+deno install --global --allow-read --allow-write --allow-run --allow-env \
+  --name deno-dist jsr:@hiisi/deno-dist/cli
 
-# Then run as
-deno-dist build node
+# node
+npm install -g @hiisi/deno-dist
 
-# Or run directly without installing
-deno run -A jsr:@hiisi/deno-dist/cli build node
+# bun
+bun install -g @hiisi/deno-dist
+
+# without installing anything
+deno run --allow-read --allow-write --allow-run --allow-env \
+  jsr:@hiisi/deno-dist/cli build node
+npx @hiisi/deno-dist build node
+bunx @hiisi/deno-dist build node
 ```
+
+Then:
+
+```bash
+deno-dist build node
+```
+
+Four permissions, named rather than `-A`, because the flags are where a tool
+states its own blast radius. It reads a config and the sources beneath it, writes
+the distributions, spawns `deno` to run the build it generates, and reads two
+environment variables. `--name` is not optional: deno infers the executable from
+the file stem, treats `cli` as generic, and falls back to something else.
+
+The npm and bun lines need the package on npm, and it is on jsr only so far.
 
 Or add a task to your `deno.json`, which is JSON rather than shell and so does not belong in the
 block above:
@@ -40,7 +61,7 @@ block above:
 ```json
 {
   "tasks": {
-    "dist": "deno run -A jsr:@hiisi/deno-dist/cli"
+    "dist": "deno run --allow-read --allow-write --allow-run --allow-env jsr:@hiisi/deno-dist/cli"
   }
 }
 ```
