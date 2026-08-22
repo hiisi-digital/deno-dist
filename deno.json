@@ -139,6 +139,8 @@
     }
   },
   "links": [
-    "../shimp"
+    "../shimp",
+    "../onlywhen",
+    "../tgts"
   ]
 }
