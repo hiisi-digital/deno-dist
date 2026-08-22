@@ -137,5 +137,8 @@
         "deno-to-bun"
       ]
     }
-  }
+  },
+  "links": [
+    "../shimp"
+  ]
 }
